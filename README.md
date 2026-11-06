@@ -164,11 +164,17 @@ match-enumeration budget; exceeding a limit reports an error, not partial result
 - Built-in Box Drawing for light/heavy and double-dash lines, mixed-weight
   corners and junctions, rounded corners, half-lines, double-line forms, and
   diagonals; unsupported diagonal mixed-weight forms fall back to the font.
+- DEC Special Graphics character set for G0/G1 (`ESC ( 0` / `ESC ) 0`) with SI/SO
+  shifts, including line drawing and symbol mappings.
 - WPF IME text composition with an underlined pre-edit preview at the terminal
   cursor; only committed text is sent to the shell.
 - Mouse reporting for DEC modes 9, 1000, 1002, and 1003, with SGR (1006) and
   legacy encoding. Mouse clicks, motion, modifiers, and wheel events are sent
   to applications when requested; otherwise the wheel scrolls terminal history.
+- Focus-event reporting for DEC mode 1004 sends `ESC[I` on window focus and
+  `ESC[O` when it loses focus.
+- Configurable horizontal tab stops: default every eight columns, set with
+  `ESC H`, clear the current stop with `CSI 0 g`, and clear all with `CSI 3 g`.
 - F1-F12 and modifier-aware navigation keys use xterm-style sequences, including
   application-cursor mode and Shift, Alt, and Ctrl combinations.
 - SGR text attributes: bold, dim, italic, underline, reverse video, and
@@ -219,11 +225,9 @@ Concrete remaining gaps include:
   implemented.
 - **Text attributes:** basic SGR rendition attributes are implemented; blink,
   conceal, overline, and double underline remain unsupported.
-- **Legacy character sets:** DEC special-graphics designation is consumed but
-  does not translate its characters into line-drawing glyphs. Unicode box drawing
-  is a separate, implemented feature.
-- **Additional protocols:** no focus-event reporting (DEC 1004), configurable tab
-  stops, or complete xterm capability/query support.
+- **Legacy character sets:** DEC Special Graphics is implemented for G0/G1 and
+  SI/SO shifts; other legacy character-set designations remain unsupported.
+- **Additional protocols:** no complete xterm capability/query support.
 
 Do not set a broad `TERM=xterm-256color` compatibility promise for this prototype;
 256-color rendering alone does not imply full xterm input and control support.

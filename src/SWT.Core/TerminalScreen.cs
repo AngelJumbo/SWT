@@ -95,6 +95,7 @@ public sealed class TerminalScreen
     private readonly StringBuilder _sequence = new();
     private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
     private readonly int[] _args = new int[64];
+    private bool[] _tabStops;
     private readonly ScreenBuffer _mainBuffer;
     private readonly ScreenBuffer _alternateBuffer;
     private ScreenBuffer _buffer;
@@ -106,6 +107,8 @@ public sealed class TerminalScreen
     private TerminalColor _foreground = TerminalColor.Default;
     private TerminalColor _background = TerminalColor.Default;
     private TerminalTextAttributes _attributes;
+    private bool _g0SpecialGraphics, _g1SpecialGraphics, _useG1;
+    private int _charsetTarget;
     private char? _pendingHighSurrogate;
 
     public TerminalScreen(int columns, int rows, int scrollbackLines = 0)
@@ -115,6 +118,7 @@ public sealed class TerminalScreen
         _mainBuffer = new ScreenBuffer(NewLines(columns, rows));
         _alternateBuffer = new ScreenBuffer(NewLines(columns, rows));
         _buffer = _mainBuffer;
+        _tabStops = CreateTabStops(columns);
         ScrollbackLimit = scrollbackLines;
     }
 
@@ -127,6 +131,7 @@ public sealed class TerminalScreen
     public bool ApplicationCursorKeys { get; private set; }
     public bool ApplicationKeypad { get; private set; }
     public bool BracketedPaste { get; private set; }
+    public bool FocusReporting { get; private set; }
     public TerminalMouseMode MouseMode { get; private set; }
     public bool SgrMouse { get; private set; }
     public bool OriginMode => _buffer.OriginMode;
@@ -147,6 +152,9 @@ public sealed class TerminalScreen
         var normalized = text.Replace("\r\n", "\n").Replace('\n', '\r');
         return BracketedPaste ? $"\x1b[200~{normalized}\x1b[201~" : normalized;
     }
+
+    public string? EncodeFocusEvent(bool focused) =>
+        FocusReporting ? focused ? "\x1b[I" : "\x1b[O" : null;
 
     public int ScrollbackLimit
     {
@@ -204,6 +212,7 @@ public sealed class TerminalScreen
     {
         ValidateSize(columns, rows);
         if (columns == Columns && rows == Rows) return;
+        if (columns != Columns) ResizeTabStops(columns);
         if (columns != Columns) ReflowMainBuffer(columns, rows);
         else ResizeBuffer(_mainBuffer, columns, rows, true);
         ResizeBuffer(_alternateBuffer, columns, rows, false);
@@ -217,6 +226,33 @@ public sealed class TerminalScreen
     {
         if (columns is < 1 or > 1000 || rows is < 1 or > 500)
             throw new ArgumentOutOfRangeException(nameof(columns), "Grid must be 1..1000 columns by 1..500 rows.");
+    }
+
+    private static bool[] CreateTabStops(int columns)
+    {
+        var stops = new bool[columns];
+        for (var column = 8; column < columns; column += 8)
+            stops[column] = true;
+        return stops;
+    }
+
+    private void ResizeTabStops(int columns)
+    {
+        var oldLength = _tabStops.Length;
+        Array.Resize(ref _tabStops, columns);
+        for (var column = oldLength; column < columns; column++)
+            if (column > 0 && column % 8 == 0) _tabStops[column] = true;
+    }
+
+    private void TabForward()
+    {
+        for (var column = CursorX + 1; column < _tabStops.Length; column++)
+        {
+            if (!_tabStops[column]) continue;
+            Move(column, CursorY);
+            return;
+        }
+        Move(Columns - 1, CursorY);
     }
 
     private TerminalLine History(int index) => _history[(_historyStart + index) % _history.Length];
@@ -469,6 +505,8 @@ public sealed class TerminalScreen
         switch (_state)
         {
             case ParserState.Charset:
+                if (_charsetTarget == 0) _g0SpecialGraphics = c == '0';
+                else _g1SpecialGraphics = c == '0';
                 _state = ParserState.Text;
                 return;
             case ParserState.CsiDiscard:
@@ -498,7 +536,15 @@ public sealed class TerminalScreen
                 case '[': _sequence.Clear(); _state = ParserState.Csi; break;
                 case ']': _state = ParserState.Osc; break;
                 case 'P': case '^': case '_': _state = ParserState.Ignore; break;
-                case '(': case ')': _state = ParserState.Charset; break;
+                case '(':
+                    _charsetTarget = 0;
+                    _state = ParserState.Charset;
+                    break;
+                case ')':
+                    _charsetTarget = 1;
+                    _state = ParserState.Charset;
+                    break;
+                case 'H': _tabStops[CursorX] = true; break;
                 case '7': SaveCursor(); break;
                 case '8': RestoreCursor(); break;
                 case '=': ApplicationKeypad = true; break;
@@ -522,10 +568,12 @@ public sealed class TerminalScreen
         }
         switch (c)
         {
+            case '\x0e': _useG1 = true; return;
+            case '\x0f': _useG1 = false; return;
             case '\r': _buffer.CursorX = 0; _buffer.WrapPending = false; return;
             case '\n': LineFeed(); return;
             case '\b': Move(CursorX - 1, CursorY); return;
-            case '\t': Move(Math.Min((CursorX / 8 + 1) * 8, Columns - 1), CursorY); return;
+            case '\t': TabForward(); return;
         }
         if (char.IsControl(c)) return;
         if (char.IsHighSurrogate(c)) { _pendingHighSurrogate = c; return; }
@@ -538,6 +586,9 @@ public sealed class TerminalScreen
 
     private void Print(string text)
     {
+        if (text.Length == 1 && text[0] is >= '\x5f' and <= '\x7e' &&
+            (_useG1 ? _g1SpecialGraphics : _g0SpecialGraphics))
+            text = MapDecSpecialGraphics(text[0]).ToString();
         var rune = Rune.GetRuneAt(text, 0);
         var category = Rune.GetUnicodeCategory(rune);
         if (category is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark or UnicodeCategory.SpacingCombiningMark)
@@ -571,6 +622,43 @@ public sealed class TerminalScreen
         if (CursorX + width >= Columns) { _buffer.CursorX = Columns - 1; _buffer.WrapPending = true; }
         else _buffer.CursorX += width;
     }
+
+    private static char MapDecSpecialGraphics(char value) => value switch
+    {
+        '\x5f' => ' ',
+        '\x60' => '\u25C6',
+        '\x61' => '\u2592',
+        '\x62' => '\u2409',
+        '\x63' => '\u240C',
+        '\x64' => '\u240D',
+        '\x65' => '\u240A',
+        '\x66' => '\u00B0',
+        '\x67' => '\u00B1',
+        '\x68' => '\u2424',
+        '\x69' => '\u240B',
+        '\x6a' => '\u2518',
+        '\x6b' => '\u2510',
+        '\x6c' => '\u250C',
+        '\x6d' => '\u2514',
+        '\x6e' => '\u253C',
+        '\x6f' => '\u23BA',
+        '\x70' => '\u23BB',
+        '\x71' => '\u2500',
+        '\x72' => '\u23BC',
+        '\x73' => '\u23BD',
+        '\x74' => '\u251C',
+        '\x75' => '\u2524',
+        '\x76' => '\u2534',
+        '\x77' => '\u252C',
+        '\x78' => '\u2502',
+        '\x79' => '\u2264',
+        '\x7a' => '\u2265',
+        '\x7b' => '\u03C0',
+        '\x7c' => '\u2260',
+        '\x7d' => '\u00A3',
+        '\x7e' => '\u00B7',
+        _ => value
+    };
 
     private static int CharacterWidth(int value) => value is
         >= 0x1100 and <= 0x115F or 0x2329 or 0x232A or
@@ -793,6 +881,10 @@ public sealed class TerminalScreen
                 else if (args[0] == 2) EraseInRow(CursorY, 0, Columns);
                 break;
             case 'X': EraseInRow(CursorY, CursorX, Math.Min(CursorX + Arg(args, 0), Columns)); break;
+            case 'g':
+                if (args[0] == 0) _tabStops[CursorX] = false;
+                else if (args[0] == 3) Array.Clear(_tabStops);
+                break;
             case '@': ShiftCharacters(Arg(args, 0), insert: true); break;
             case 'P': ShiftCharacters(Arg(args, 0), insert: false); break;
             case 'r':
@@ -858,6 +950,7 @@ public sealed class TerminalScreen
                     Position(0, 0);
                     break;
                 case 25: CursorVisible = enabled; break;
+                case 1004: FocusReporting = enabled; break;
                 case 9: SetMouseMode(TerminalMouseMode.X10, enabled); break;
                 case 1000: SetMouseMode(TerminalMouseMode.Normal, enabled); break;
                 case 1002: SetMouseMode(TerminalMouseMode.ButtonEvent, enabled); break;

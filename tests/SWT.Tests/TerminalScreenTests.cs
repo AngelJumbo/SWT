@@ -61,6 +61,37 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
         Assert.Equal(TerminalMouseMode.Normal, screen.MouseMode);
     }
 
+    [Fact]
+    public void FocusReportingModeEncodesFocusInAndOutOnlyWhenEnabled()
+    {
+        var screen = new TerminalScreen(10, 3);
+        Assert.False(screen.FocusReporting);
+        Assert.Null(screen.EncodeFocusEvent(focused: true));
+        Assert.Null(screen.EncodeFocusEvent(focused: false));
+
+        Feed(screen, "\x1b[?1004h");
+        Assert.True(screen.FocusReporting);
+        Assert.Equal("\x1b[I", screen.EncodeFocusEvent(focused: true));
+        Assert.Equal("\x1b[O", screen.EncodeFocusEvent(focused: false));
+
+        Feed(screen, "\x1b[?1004l");
+        Assert.False(screen.FocusReporting);
+        Assert.Null(screen.EncodeFocusEvent(focused: true));
+    }
+
+    [Fact]
+    public void FocusReportingModeCanBeCombinedWithOtherPrivateModes()
+    {
+        var screen = new TerminalScreen(10, 3);
+        Feed(screen, "\x1b[?1004;1006h");
+        Assert.True(screen.FocusReporting);
+        Assert.True(screen.SgrMouse);
+
+        Feed(screen, "\x1b[?1004l");
+        Assert.False(screen.FocusReporting);
+        Assert.True(screen.SgrMouse);
+    }
+
     [Theory]
     [InlineData(0, 1, 1, false, false, TerminalMouseModifiers.None, true, "\x1b[<0;1;1M")]
     [InlineData(2, 8, 4, true, false, TerminalMouseModifiers.None, true, "\x1b[<2;8;4m")]
@@ -216,6 +247,43 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
         Assert.Equal("\uFFFD", screen.Line(0));
         Feed(screen, new string('\u0301', 1000));
         Assert.InRange(screen[0, 0].Text!.Length, 1, 64);
+    }
+
+    [Fact]
+    public void TabMovesToNextDefaultEightColumnStop()
+    {
+        var screen = new TerminalScreen(24, 2);
+        Feed(screen, "\t\t\t");
+
+        Assert.Equal(23, screen.CursorX);
+        Feed(screen, "\r\t");
+        Assert.Equal(8, screen.CursorX);
+    }
+
+    [Fact]
+    public void TabStopsCanBeSetClearedIndividuallyAndClearedAllAtOnce()
+    {
+        var screen = new TerminalScreen(24, 2);
+        Feed(screen, "\x1b[1;4H\x1bH\x1b[1;1H\t");
+        Assert.Equal(3, screen.CursorX);
+
+        Feed(screen, "\t");
+        Assert.Equal(8, screen.CursorX);
+        Feed(screen, "\x1b[0g\x1b[1;4H\t");
+        Assert.Equal(16, screen.CursorX);
+
+        Feed(screen, "\x1b[3g\r\t");
+        Assert.Equal(23, screen.CursorX);
+    }
+
+    [Fact]
+    public void ResizingAddsDefaultStopsForNewColumns()
+    {
+        var screen = new TerminalScreen(12, 2);
+        screen.Resize(24, 2);
+        Feed(screen, "\x1b[1;13H\t");
+
+        Assert.Equal(16, screen.CursorX);
     }
 
     [Theory]
@@ -1219,5 +1287,35 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
         var screen = new TerminalScreen(10, 2);
         Feed(screen, "\x1b(BOK");
         Assert.StartsWith("OK", screen.Line(0));
+    }
+
+    [Fact]
+    public void DecSpecialGraphicsMapsLineDrawingAndSymbols()
+    {
+        var screen = new TerminalScreen(40, 2);
+        Feed(screen, "\x1b(0lqk\x1b(B " +
+            "\x1b(0`abcdefghijklmno" +
+            "pqrstuvwxyz{|}~");
+
+        Assert.Equal("┌─┐ ◆▒␉␌␍␊°±␤␋┘┐┌└┼⎺⎻─⎼⎽├┤┴┬│≤≥π≠£·",
+            screen.Line(0).TrimEnd());
+    }
+
+    [Fact]
+    public void DecSpecialGraphicsG0G1AndShiftControlsAreIndependentAcrossSplits()
+    {
+        const string input = "\x1b(0l\x1b)0\x0e" +
+            "q\x1b(B\x0f" +
+            "q\x0e" +
+            "q\x0f" +
+            "q";
+        var bytes = Encoding.UTF8.GetBytes(input);
+        for (var split = 0; split <= bytes.Length; split++)
+        {
+            var screen = new TerminalScreen(10, 2);
+            screen.Feed(bytes.AsSpan(0, split));
+            screen.Feed(bytes.AsSpan(split));
+            Assert.Equal("┌─q─q", screen.Line(0).TrimEnd());
+        }
     }
 }

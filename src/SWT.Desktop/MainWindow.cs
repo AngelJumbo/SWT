@@ -240,6 +240,8 @@ public sealed class MainWindow : Window
         }
         _view.GotKeyboardFocus += (_, _) => _view.MarkDirty();
         _view.LostKeyboardFocus += (_, _) => _view.MarkDirty();
+        Activated += async (_, _) => await SendFocusEvent(true);
+        Deactivated += async (_, _) => await SendFocusEvent(false);
         _view.MouseLeftButtonDown += (_, e) =>
         {
             if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) DragMove();
@@ -592,6 +594,12 @@ public sealed class MainWindow : Window
         try { await _session.WriteAsync(text); }
         catch (Exception ex) when (ex is IOException or System.Threading.Channels.ChannelClosedException or ObjectDisposedException)
         { Status($"Input failed: {ex.Message}"); }
+    }
+
+    private async Task SendFocusEvent(bool focused)
+    {
+        var sequence = _screen.EncodeFocusEvent(focused);
+        if (sequence is not null) await Send(sequence, followOutput: false);
     }
 
     private async void MouseDownTerminal(object sender, MouseButtonEventArgs e)

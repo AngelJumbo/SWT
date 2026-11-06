@@ -1,0 +1,117 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Test Release build
+        run: dotnet test .\SWT.slnx --configuration Release --logger "trx;LogFileName=tests.trx" --results-directory .\TestResults
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: TestResults
+          if-no-files-found: warn
+
+      - name: Install Inno Setup
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --yes --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup installation failed." }
+          }
+
+      - name: Package
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+            "0.0.0-ci.$env:GITHUB_RUN_NUMBER"
+          }
+          .\build\Package.ps1 -Version $version
+
+      - name: Verify portable and installed builds
+        run: |
+          function Invoke-CheckedProcess {
+            param([string]$FilePath, [string[]]$Arguments)
+            $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru
+            if (-not $process.WaitForExit(120000)) {
+              Stop-Process -Id $process.Id -Force
+              throw "$FilePath timed out."
+            }
+            if ($process.ExitCode -ne 0) { throw "$FilePath exited with $($process.ExitCode)." }
+          }
+
+          $portable = Join-Path $env:RUNNER_TEMP 'SWT-portable'
+          Expand-Archive -Path (Get-Item .\artifacts\SWT-*-win-x64.zip).FullName -DestinationPath $portable
+          Invoke-CheckedProcess "$portable\SWT.Desktop.exe" @('--smoke-test')
+
+          $installed = Join-Path $env:RUNNER_TEMP 'SWT-installed'
+          $installer = (Get-Item .\artifacts\SWT-*-win-x64-setup.exe).FullName
+          Invoke-CheckedProcess $installer @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=`"$installed`"")
+          try {
+            Invoke-CheckedProcess "$installed\SWT.Desktop.exe" @('--smoke-test')
+          } finally {
+            Invoke-CheckedProcess "$installed\unins000.exe" @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
+          }
+          if (Test-Path "$installed\SWT.Desktop.exe") { throw "Uninstall left the application executable behind." }
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: SWT-win-x64
+          path: |
+            artifacts/*.exe
+            artifacts/*.zip
+            artifacts/SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SWT-win-x64
+          path: packages
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          args=(--verify-tag --generate-notes --title "SWT $RELEASE_TAG")
+          if [[ "$RELEASE_TAG" == *-* ]]; then args+=(--prerelease); fi
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" packages/* --clobber
+          else
+            gh release create "$RELEASE_TAG" packages/* "${args[@]}"
+          fi

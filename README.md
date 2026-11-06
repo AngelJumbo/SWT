@@ -22,6 +22,15 @@ dotnet test .\SWT.slnx
 PowerShell 7 is selected from PATH; Windows PowerShell is the explicit fallback.
 No administrator permissions are needed.
 
+## Install
+
+Download a Windows x64 package from [Releases](https://github.com/AngelJumbo/SWT/releases):
+
+- `SWT-<version>-win-x64-setup.exe`: per-user installer with a Start menu shortcut
+  and optional desktop shortcut. Uninstall through Windows Settings.
+- `SWT-<version>-win-x64.zip`: extract the entire archive and run `SWT.Desktop.exe`.
+
+
 ## Appearance
 
 First launch creates `%LOCALAPPDATA%\SWT\config.toml` without replacing an

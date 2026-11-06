@@ -773,18 +773,46 @@ public sealed class MainWindow : Window
             Key.Add => "\x1bOk", Key.Subtract => "\x1bOm", Key.Multiply => "\x1bOj",
             Key.Divide => "\x1bOo", _ => null
         } : null;
-        var sequence = keypadSequence ?? (key switch
+        var terminalKey = key switch
         {
-            Key.Enter => "\r", Key.Back => "\x7f", Key.Tab => modifiers.HasFlag(ModifierKeys.Shift) ? "\x1b[Z" : "\t",
-            Key.Escape => "\x1b",
-            Key.Up when _screen.ApplicationCursorKeys => "\x1bOA",
-            Key.Down when _screen.ApplicationCursorKeys => "\x1bOB",
-            Key.Right when _screen.ApplicationCursorKeys => "\x1bOC",
-            Key.Left when _screen.ApplicationCursorKeys => "\x1bOD",
-            Key.Up => "\x1b[A", Key.Down => "\x1b[B", Key.Right => "\x1b[C", Key.Left => "\x1b[D",
-            Key.Home => "\x1b[H", Key.End => "\x1b[F", Key.Delete => "\x1b[3~", Key.Insert => "\x1b[2~",
-            Key.PageUp => "\x1b[5~", Key.PageDown => "\x1b[6~", _ => null
-        });
+            Key.Up => TerminalKey.Up,
+            Key.Down => TerminalKey.Down,
+            Key.Right => TerminalKey.Right,
+            Key.Left => TerminalKey.Left,
+            Key.Home => TerminalKey.Home,
+            Key.End => TerminalKey.End,
+            Key.Insert => TerminalKey.Insert,
+            Key.Delete => TerminalKey.Delete,
+            Key.PageUp => TerminalKey.PageUp,
+            Key.PageDown => TerminalKey.PageDown,
+            Key.F1 => TerminalKey.F1,
+            Key.F2 => TerminalKey.F2,
+            Key.F3 => TerminalKey.F3,
+            Key.F4 => TerminalKey.F4,
+            Key.F5 => TerminalKey.F5,
+            Key.F6 => TerminalKey.F6,
+            Key.F7 => TerminalKey.F7,
+            Key.F8 => TerminalKey.F8,
+            Key.F9 => TerminalKey.F9,
+            Key.F10 => TerminalKey.F10,
+            Key.F11 => TerminalKey.F11,
+            Key.F12 => TerminalKey.F12,
+            _ => (TerminalKey?)null
+        };
+        var keyModifiers = TerminalKeyModifiers.None;
+        if (modifiers.HasFlag(ModifierKeys.Shift)) keyModifiers |= TerminalKeyModifiers.Shift;
+        if (modifiers.HasFlag(ModifierKeys.Alt)) keyModifiers |= TerminalKeyModifiers.Alt;
+        if (modifiers.HasFlag(ModifierKeys.Control)) keyModifiers |= TerminalKeyModifiers.Control;
+        var sequence = keypadSequence ?? (terminalKey is { } encodedKey
+            ? TerminalKeyInput.Encode(encodedKey, keyModifiers, _screen.ApplicationCursorKeys)
+            : key switch
+            {
+                Key.Enter => "\r",
+                Key.Back => "\x7f",
+                Key.Tab => modifiers.HasFlag(ModifierKeys.Shift) ? "\x1b[Z" : "\t",
+                Key.Escape => "\x1b",
+                _ => null
+            });
         if (sequence is not null) { e.Handled = true; await Send(sequence); }
     }
 

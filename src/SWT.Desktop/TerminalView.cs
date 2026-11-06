@@ -19,13 +19,14 @@ public sealed class TerminalView : FrameworkElement
     private const double PadX = 8, PadY = 4;
     private Appearance _appearance;
     private Typeface _typeface = null!;
-    private GlyphTypeface? _normalGlyphs, _boldGlyphs;
-    private Brush _foreground = null!, _background = null!, _cursor = null!, _thumb = null!, _selection = null!;
+    private GlyphTypeface? _normalGlyphs, _boldGlyphs, _italicGlyphs, _boldItalicGlyphs;
+    private Brush _foreground = null!, _background = null!, _backgroundText = null!, _cursor = null!, _thumb = null!, _selection = null!;
     private Pen _compositionPen = null!;
     private string _compositionText = "";
     private double _pixelsPerDip = 1;
     private readonly Dictionary<int, Brush> _brushes = new();
-    private readonly Dictionary<(string Text, int Color, bool Rgb, bool Bold), FormattedText> _glyphs = new();
+    private readonly Dictionary<(int Value, bool IsRgb, bool Background), Brush> _dimBrushes = new();
+    private readonly Dictionary<(string Text, int Color, bool Rgb, TerminalTextAttributes Attributes), FormattedText> _glyphs = new();
     // Per-line drawings keyed by line identity; rebuilt only when a line's version changes.
     private Dictionary<TerminalLine, (int Version, Drawing Drawing)> _lineCache = new(ReferenceEqualityComparer.Instance);
     private Dictionary<TerminalLine, (int Version, Drawing Drawing)> _nextCache = new(ReferenceEqualityComparer.Instance);
@@ -88,11 +89,14 @@ public sealed class TerminalView : FrameworkElement
         _typeface = new Typeface(appearance.FontFamily);
         _typeface.TryGetGlyphTypeface(out _normalGlyphs);
         new Typeface(_typeface.FontFamily, FontStyles.Normal, FontWeights.Bold, FontStretches.Normal).TryGetGlyphTypeface(out _boldGlyphs);
+        new Typeface(_typeface.FontFamily, FontStyles.Italic, FontWeights.Normal, FontStretches.Normal).TryGetGlyphTypeface(out _italicGlyphs);
+        new Typeface(_typeface.FontFamily, FontStyles.Italic, FontWeights.Bold, FontStretches.Normal).TryGetGlyphTypeface(out _boldItalicGlyphs);
         _foreground = Brush(appearance.Foreground);
         var background = (SolidColorBrush)Brush(appearance.Background);
         _background = new SolidColorBrush(Color.FromArgb((byte)Math.Round(appearance.BackgroundOpacity * 255),
             background.Color.R, background.Color.G, background.Color.B));
         _background.Freeze();
+        _backgroundText = Brush(appearance.Background);
         _cursor = Brush(appearance.Cursor);
         _compositionPen = new Pen(_foreground, Math.Max(1, _pixelsPerDip));
         _compositionPen.Freeze();
@@ -103,6 +107,7 @@ public sealed class TerminalView : FrameworkElement
         _selection.Opacity = .45;
         _selection.Freeze();
         _brushes.Clear();
+        _dimBrushes.Clear();
         _glyphs.Clear();
         _lineCache.Clear();
         var metrics = Text("M", _foreground, false);
@@ -476,11 +481,17 @@ public sealed class TerminalView : FrameworkElement
             var width = Math.Min(line.Length, columns);
             for (var x = 0; x < width;)
             {
-                var background = line[x].Background;
+                var cell = line[x];
+                var background = cell.Background;
+                var reverse = cell.Attributes.HasFlag(TerminalTextAttributes.Reverse);
                 var end = x + 1;
-                while (end < width && line[end].Background == background) end++;
-                if (background.Value >= 0)
-                    dc.DrawRectangle(Resolve(background, _background, background: true), null,
+                while (end < width && line[end].Background == background &&
+                    (!reverse || line[end].Foreground == cell.Foreground) &&
+                    line[end].Attributes.HasFlag(TerminalTextAttributes.Reverse) == reverse) end++;
+                if (background.Value >= 0 || reverse)
+                    dc.DrawRectangle(reverse
+                            ? Resolve(cell.Foreground, _foreground)
+                            : Resolve(background, _background, background: true), null,
                         new Rect(x * CellWidth, 0, (end - x) * CellWidth, CellHeight));
                 x = end;
             }
@@ -488,12 +499,14 @@ public sealed class TerminalView : FrameworkElement
             {
                 var cell = line[x];
                 if (cell.Width == 0) { x++; continue; }
-                if (TryDrawBox(dc, cell, x) || TryDrawBlock(dc, cell, x))
+                var foreground = ForegroundBrush(cell);
+                if (TryDrawBox(dc, cell, x, foreground) || TryDrawBlock(dc, cell, x, foreground))
                 {
+                    DrawDecorations(dc, cell, x, cell.Width, foreground);
                     x++;
                     continue;
                 }
-                var face = cell.Bold ? _boldGlyphs : _normalGlyphs;
+                var face = GlyphTypefaceFor(cell.Attributes);
                 var start = x;
                 var count = 0;
                 var ink = false;
@@ -501,7 +514,8 @@ public sealed class TerminalView : FrameworkElement
                 {
                     var next = line[x];
                     var value = next.Text ?? " ";
-                    if (next.Width != 1 || next.Foreground != cell.Foreground || next.Bold != cell.Bold || value.Length != 1 ||
+                    if (next.Width != 1 || next.Foreground != cell.Foreground ||
+                        next.Background != cell.Background || next.Attributes != cell.Attributes || value.Length != 1 ||
                         value[0] is >= '\u2500' and <= '\u257F' or >= '\u2580' and <= '\u259F' ||
                         !face.CharacterToGlyphMap.TryGetValue(value[0], out var glyph)) break;
                     if (count == _glyphBuffer.Length) Array.Resize(ref _glyphBuffer, count * 2);
@@ -511,40 +525,47 @@ public sealed class TerminalView : FrameworkElement
                 }
                 if (count > 0)
                 {
-                    if (!ink) continue;
-                    var advances = new double[count];
-                    Array.Fill(advances, CellWidth);
-                    var run = new GlyphRun(face, 0, false, _appearance.FontSize, (float)_pixelsPerDip,
-                        _glyphBuffer.AsSpan(0, count).ToArray(),
-                        new Point(start * CellWidth, face!.Baseline * _appearance.FontSize),
-                        advances, null, null, null, null, null, null);
-                    dc.DrawGlyphRun(Resolve(cell.Foreground, _foreground), run);
+                    if (ink)
+                    {
+                        var advances = new double[count];
+                        Array.Fill(advances, CellWidth);
+                        var run = new GlyphRun(face, 0, false, _appearance.FontSize, (float)_pixelsPerDip,
+                            _glyphBuffer.AsSpan(0, count).ToArray(),
+                            new Point(start * CellWidth, face!.Baseline * _appearance.FontSize),
+                            advances, null, null, null, null, null, null);
+                        dc.DrawGlyphRun(foreground, run);
+                    }
+                    DrawDecorations(dc, cell, start, count, foreground);
                     continue;
                 }
                 x++;
-                if (cell.Text is null or " ") continue;
-                var key = (cell.Text, cell.Foreground.Value, cell.Foreground.IsRgb, cell.Bold);
-                if (!_glyphs.TryGetValue(key, out var text))
+                var textValue = cell.Text ?? " ";
+                if (textValue != " ")
                 {
-                    if (_glyphs.Count >= 4096) _glyphs.Clear();
-                    _glyphs[key] = text = Text(cell.Text, Resolve(cell.Foreground, _foreground), cell.Bold);
+                    var reverse = cell.Attributes.HasFlag(TerminalTextAttributes.Reverse);
+                    var effectiveForeground = reverse ? cell.Background : cell.Foreground;
+                    var key = (textValue, effectiveForeground.Value, effectiveForeground.IsRgb, cell.Attributes);
+                    if (!_glyphs.TryGetValue(key, out var text))
+                    {
+                        if (_glyphs.Count >= 4096) _glyphs.Clear();
+                        _glyphs[key] = text = Text(textValue, foreground, cell.Attributes);
+                    }
+                    dc.PushClip(new RectangleGeometry(new Rect(start * CellWidth, 0,
+                        Math.Min(cell.Width, columns - start) * CellWidth, CellHeight)));
+                    dc.DrawText(text, new Point(start * CellWidth, 0));
+                    dc.Pop();
                 }
-                dc.PushClip(new RectangleGeometry(new Rect(start * CellWidth, 0,
-                    Math.Min(cell.Width, columns - start) * CellWidth, CellHeight)));
-                dc.DrawText(text, new Point(start * CellWidth, 0));
-                dc.Pop();
+                DrawDecorations(dc, cell, start, cell.Width, foreground);
             }
         }
         group.Freeze();
         return group;
     }
 
-    private bool TryDrawBox(DrawingContext dc, Cell cell, int column)
+    private bool TryDrawBox(DrawingContext dc, Cell cell, int column, Brush brush)
     {
         if (cell.Text is not { Length: 1 } text || !TryGetBoxGlyph(text[0], out var glyph))
             return false;
-
-        var brush = Resolve(cell.Foreground, _foreground);
         var left = column * CellWidth;
         var centerX = (column + .5) * CellWidth;
         var centerY = CellHeight / 2;
@@ -707,13 +728,12 @@ public sealed class TerminalView : FrameworkElement
             or >= '\u2547' and <= '\u257F';
     }
 
-    private bool TryDrawBlock(DrawingContext dc, Cell cell, int column)
+    private bool TryDrawBlock(DrawingContext dc, Cell cell, int column, Brush brush)
     {
         if (cell.Text is not { Length: 1 } text || text[0] is < '\u2580' or > '\u259F')
             return false;
 
         var ch = text[0];
-        var brush = Resolve(cell.Foreground, _foreground);
         var left = column * CellWidth;
         if (ch is >= '\u2591' and <= '\u2593')
         {
@@ -755,6 +775,61 @@ public sealed class TerminalView : FrameworkElement
         else if (ch == '\u2595') { rect.Width /= 8; rect.X += CellWidth - rect.Width; }
         dc.DrawRectangle(brush, null, rect);
         return true;
+    }
+
+    private FormattedText Text(string text, Brush brush, TerminalTextAttributes attributes)
+    {
+        var typeface = new Typeface(_typeface.FontFamily,
+            attributes.HasFlag(TerminalTextAttributes.Italic) ? FontStyles.Italic : FontStyles.Normal,
+            attributes.HasFlag(TerminalTextAttributes.Bold) ? FontWeights.Bold : FontWeights.Normal,
+            FontStretches.Normal);
+        return new FormattedText(text, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+            typeface, _appearance.FontSize, brush, _pixelsPerDip);
+    }
+
+    private GlyphTypeface? GlyphTypefaceFor(TerminalTextAttributes attributes) =>
+        (attributes.HasFlag(TerminalTextAttributes.Bold), attributes.HasFlag(TerminalTextAttributes.Italic)) switch
+        {
+            (true, true) => _boldItalicGlyphs,
+            (true, false) => _boldGlyphs,
+            (false, true) => _italicGlyphs,
+            _ => _normalGlyphs
+        };
+
+    private Brush ForegroundBrush(Cell cell)
+    {
+        var reverse = cell.Attributes.HasFlag(TerminalTextAttributes.Reverse);
+        var color = reverse ? cell.Background : cell.Foreground;
+        var brush = reverse
+            ? Resolve(color, _backgroundText)
+            : Resolve(color, _foreground);
+        if (!cell.Attributes.HasFlag(TerminalTextAttributes.Dim)) return brush;
+        var key = (color.Value, color.IsRgb, reverse);
+        if (_dimBrushes.TryGetValue(key, out var cached)) return cached;
+        var dim = brush.CloneCurrentValue();
+        dim.Opacity *= .5;
+        dim.Freeze();
+        _dimBrushes[key] = dim;
+        return dim;
+    }
+
+    private void DrawDecorations(DrawingContext dc, Cell cell, int column, int count, Brush brush)
+    {
+        if (count <= 0) return;
+        var attributes = cell.Attributes;
+        var left = column * CellWidth;
+        var right = (column + count) * CellWidth;
+        var thickness = Math.Max(1, _appearance.FontSize / 14);
+        if (attributes.HasFlag(TerminalTextAttributes.Underline))
+        {
+            var y = Math.Min(CellHeight - thickness / 2, _typeface.FontFamily.LineSpacing * _appearance.FontSize - thickness);
+            dc.DrawLine(new Pen(brush, thickness), new Point(left, y), new Point(right, y));
+        }
+        if (attributes.HasFlag(TerminalTextAttributes.Strikethrough))
+        {
+            var y = CellHeight * .52;
+            dc.DrawLine(new Pen(brush, thickness), new Point(left, y), new Point(right, y));
+        }
     }
 
     private FormattedText Text(string text, Brush brush, bool bold) =>

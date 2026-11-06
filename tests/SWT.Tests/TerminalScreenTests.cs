@@ -90,6 +90,53 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
             TerminalMouseInput.Encode(3, 1, 1, release: true, motion: true, TerminalMouseModifiers.None, sgr: true));
     }
 
+    [Theory]
+    [InlineData(TerminalKey.Up, false, "\x1b[A")]
+    [InlineData(TerminalKey.Up, true, "\x1bOA")]
+    [InlineData(TerminalKey.Down, true, "\x1bOB")]
+    [InlineData(TerminalKey.Right, true, "\x1bOC")]
+    [InlineData(TerminalKey.Left, true, "\x1bOD")]
+    [InlineData(TerminalKey.Home, false, "\x1b[H")]
+    [InlineData(TerminalKey.End, false, "\x1b[F")]
+    [InlineData(TerminalKey.Insert, false, "\x1b[2~")]
+    [InlineData(TerminalKey.Delete, false, "\x1b[3~")]
+    [InlineData(TerminalKey.PageUp, false, "\x1b[5~")]
+    [InlineData(TerminalKey.PageDown, false, "\x1b[6~")]
+    [InlineData(TerminalKey.F1, false, "\x1bOP")]
+    [InlineData(TerminalKey.F2, false, "\x1bOQ")]
+    [InlineData(TerminalKey.F3, false, "\x1bOR")]
+    [InlineData(TerminalKey.F4, false, "\x1bOS")]
+    [InlineData(TerminalKey.F5, false, "\x1b[15~")]
+    [InlineData(TerminalKey.F6, false, "\x1b[17~")]
+    [InlineData(TerminalKey.F7, false, "\x1b[18~")]
+    [InlineData(TerminalKey.F8, false, "\x1b[19~")]
+    [InlineData(TerminalKey.F9, false, "\x1b[20~")]
+    [InlineData(TerminalKey.F10, false, "\x1b[21~")]
+    [InlineData(TerminalKey.F11, false, "\x1b[23~")]
+    [InlineData(TerminalKey.F12, false, "\x1b[24~")]
+    public void FunctionAndNavigationKeysEncodeStandardSequences(TerminalKey key, bool applicationCursorKeys,
+        string expected)
+    {
+        Assert.Equal(expected, TerminalKeyInput.Encode(key, TerminalKeyModifiers.None, applicationCursorKeys));
+    }
+
+    [Theory]
+    [InlineData(TerminalKey.Up, TerminalKeyModifiers.Control, false, "\x1b[1;5A")]
+    [InlineData(TerminalKey.Left, TerminalKeyModifiers.Shift, true, "\x1b[1;2D")]
+    [InlineData(TerminalKey.Right, TerminalKeyModifiers.Alt, true, "\x1b[1;3C")]
+    [InlineData(TerminalKey.Down, TerminalKeyModifiers.Shift | TerminalKeyModifiers.Control, false, "\x1b[1;6B")]
+    [InlineData(TerminalKey.Home, TerminalKeyModifiers.Alt | TerminalKeyModifiers.Control, false, "\x1b[1;7H")]
+    [InlineData(TerminalKey.F1, TerminalKeyModifiers.Control, false, "\x1b[1;5P")]
+    [InlineData(TerminalKey.F4, TerminalKeyModifiers.Shift | TerminalKeyModifiers.Alt, false, "\x1b[1;4S")]
+    [InlineData(TerminalKey.F5, TerminalKeyModifiers.Control, false, "\x1b[15;5~")]
+    [InlineData(TerminalKey.F12, TerminalKeyModifiers.Shift | TerminalKeyModifiers.Control, false, "\x1b[24;6~")]
+    [InlineData(TerminalKey.Delete, TerminalKeyModifiers.Alt, false, "\x1b[3;3~")]
+    public void ModifiedFunctionAndNavigationKeysUseXtermModifierEncoding(TerminalKey key,
+        TerminalKeyModifiers modifiers, bool applicationCursorKeys, string expected)
+    {
+        Assert.Equal(expected, TerminalKeyInput.Encode(key, modifiers, applicationCursorKeys));
+    }
+
     [Fact]
     public void CombiningAtRightEdgeDoesNotTriggerWrap()
     {
@@ -1129,6 +1176,33 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
         Assert.Equal(new TerminalColor(9), screen[0, 0].Foreground);
         Assert.Equal(new TerminalColor(123), screen[0, 0].Background);
         Assert.Equal(TerminalColor.Default, screen[0, 1].Foreground);
+    }
+
+    [Fact]
+    public void SgrTextAttributesAreStoredPerCellAndResetIndependently()
+    {
+        var screen = new TerminalScreen(10, 2);
+        Feed(screen, "A\x1b[1;2;3;4;7;9mB\x1b[22;23;24;27;29mC\x1b[0mD");
+
+        Assert.Equal(TerminalTextAttributes.None, screen[0, 0].Attributes);
+        Assert.Equal(TerminalTextAttributes.Bold | TerminalTextAttributes.Dim |
+            TerminalTextAttributes.Italic | TerminalTextAttributes.Underline |
+            TerminalTextAttributes.Reverse | TerminalTextAttributes.Strikethrough, screen[0, 1].Attributes);
+        Assert.Equal(TerminalTextAttributes.None, screen[0, 2].Attributes);
+        Assert.Equal(TerminalTextAttributes.None, screen[0, 3].Attributes);
+    }
+
+    [Fact]
+    public void SgrTwentyTwoResetsBoldAndDimWithoutResettingOtherAttributes()
+    {
+        var screen = new TerminalScreen(10, 2);
+        Feed(screen, "\x1b[1;2;3;4;7;9mA\x1b[22mB");
+
+        Assert.Equal(TerminalTextAttributes.Bold | TerminalTextAttributes.Dim |
+            TerminalTextAttributes.Italic | TerminalTextAttributes.Underline |
+            TerminalTextAttributes.Reverse | TerminalTextAttributes.Strikethrough, screen[0, 0].Attributes);
+        Assert.Equal(TerminalTextAttributes.Italic | TerminalTextAttributes.Underline |
+            TerminalTextAttributes.Reverse | TerminalTextAttributes.Strikethrough, screen[0, 1].Attributes);
     }
 
     [Fact]

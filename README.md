@@ -169,6 +169,10 @@ match-enumeration budget; exceeding a limit reports an error, not partial result
 - Mouse reporting for DEC modes 9, 1000, 1002, and 1003, with SGR (1006) and
   legacy encoding. Mouse clicks, motion, modifiers, and wheel events are sent
   to applications when requested; otherwise the wheel scrolls terminal history.
+- F1-F12 and modifier-aware navigation keys use xterm-style sequences, including
+  application-cursor mode and Shift, Alt, and Ctrl combinations.
+- SGR text attributes: bold, dim, italic, underline, reverse video, and
+  strikethrough, with independent reset codes.
 - Bounded scrollback with wheel/keyboard navigation and width reflow of the main
   buffer and retained history. Soft wraps are reassembled; explicit line breaks,
   cell colors and Unicode cells are retained. The alternate screen remains a
@@ -210,12 +214,11 @@ application, version, configuration or plugin.
 
 Concrete remaining gaps include:
 
-- **Keyboard:** no explicit F1-F12 encoding or modifier-aware navigation sequences
-  (for example Ctrl+Arrow and Shift+Arrow). Applications may not receive those
-  shortcuts correctly.
-- **Text attributes:** SGR supports colors and bold, but not italic, underline,
-  reverse video, dim or strikethrough. Applications using reverse video for
-  selection or menus can therefore display them incorrectly.
+- **Keyboard:** F1-F12 and modified arrows, Home/End, Insert/Delete, and
+  PageUp/PageDown are encoded; other modified key combinations are not yet
+  implemented.
+- **Text attributes:** basic SGR rendition attributes are implemented; blink,
+  conceal, overline, and double underline remain unsupported.
 - **Legacy character sets:** DEC special-graphics designation is consumed but
   does not translate its characters into line-drawing glyphs. Unicode box drawing
   is a separate, implemented feature.

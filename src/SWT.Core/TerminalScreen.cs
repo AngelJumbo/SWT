@@ -10,10 +10,26 @@ public readonly record struct TerminalColor(int Value, bool IsRgb = false)
     public static TerminalColor Default => new(-1);
 }
 
+[Flags]
+public enum TerminalTextAttributes
+{
+    None = 0,
+    Bold = 1,
+    Dim = 2,
+    Italic = 4,
+    Underline = 8,
+    Reverse = 16,
+    Strikethrough = 32
+}
+
 public readonly record struct Cell(string? Text, TerminalColor Foreground, TerminalColor Background, bool Bold)
 {
     public int Width { get; init; } = 1;
-    internal bool IsDefaultBlank => Width != 0 && (Text is null or " ") && Background.Value < 0;
+    public TerminalTextAttributes Attributes { get; init; }
+    internal bool IsDefaultBlank => Width != 0 && (Text is null or " ") &&
+        Background.Value < 0 &&
+        (Attributes & (TerminalTextAttributes.Underline | TerminalTextAttributes.Reverse |
+            TerminalTextAttributes.Strikethrough)) == 0;
 }
 
 // A row of cells. Version changes whenever visible content changes, so renderers can cache by (line, version).
@@ -89,7 +105,7 @@ public sealed class TerminalScreen
     private int _scrollbackLimit;
     private TerminalColor _foreground = TerminalColor.Default;
     private TerminalColor _background = TerminalColor.Default;
-    private bool _bold;
+    private TerminalTextAttributes _attributes;
     private char? _pendingHighSurrogate;
 
     public TerminalScreen(int columns, int rows, int scrollbackLines = 0)
@@ -545,9 +561,11 @@ public sealed class TerminalScreen
         line.NarrowWideCell = null;
         ClearWideCharacter(line, CursorX);
         if (width == 2) ClearWideCharacter(line, CursorX + 1);
-        line.Cells[CursorX] = new Cell(text, _foreground, _background, _bold) { Width = width };
+        line.Cells[CursorX] = new Cell(text, _foreground, _background,
+            _attributes.HasFlag(TerminalTextAttributes.Bold)) { Width = width, Attributes = _attributes };
         if (width == 2)
-            line.Cells[CursorX + 1] = new Cell("", _foreground, _background, _bold) { Width = 0 };
+            line.Cells[CursorX + 1] = new Cell("", _foreground, _background,
+                _attributes.HasFlag(TerminalTextAttributes.Bold)) { Width = 0, Attributes = _attributes };
         if (line.IsWrapped) line.SetWrap(true, Math.Max(line.WrappedLength, CursorX + width));
         line.Touch();
         if (CursorX + width >= Columns) { _buffer.CursorX = Columns - 1; _buffer.WrapPending = true; }
@@ -687,7 +705,8 @@ public sealed class TerminalScreen
         lines[last].SetWrap(false);
     }
 
-    private Cell Blank => new(" ", _foreground, _background, _bold);
+    private Cell Blank => new(" ", _foreground, _background,
+        _attributes.HasFlag(TerminalTextAttributes.Bold)) { Attributes = _attributes };
 
     private void EraseRows(int startRow, int endRow)
     {
@@ -910,9 +929,18 @@ public sealed class TerminalScreen
             var n = args[i];
             switch (n)
             {
-                case 0: _foreground = _background = TerminalColor.Default; _bold = false; break;
-                case 1: _bold = true; break;
-                case 22: _bold = false; break;
+                case 0: _foreground = _background = TerminalColor.Default; _attributes = TerminalTextAttributes.None; break;
+                case 1: _attributes |= TerminalTextAttributes.Bold; break;
+                case 2: _attributes |= TerminalTextAttributes.Dim; break;
+                case 3: _attributes |= TerminalTextAttributes.Italic; break;
+                case 4: _attributes |= TerminalTextAttributes.Underline; break;
+                case 7: _attributes |= TerminalTextAttributes.Reverse; break;
+                case 9: _attributes |= TerminalTextAttributes.Strikethrough; break;
+                case 22: _attributes &= ~(TerminalTextAttributes.Bold | TerminalTextAttributes.Dim); break;
+                case 23: _attributes &= ~TerminalTextAttributes.Italic; break;
+                case 24: _attributes &= ~TerminalTextAttributes.Underline; break;
+                case 27: _attributes &= ~TerminalTextAttributes.Reverse; break;
+                case 29: _attributes &= ~TerminalTextAttributes.Strikethrough; break;
                 case 39: _foreground = TerminalColor.Default; break;
                 case 49: _background = TerminalColor.Default; break;
                 case >= 30 and <= 37: _foreground = new(n - 30); break;

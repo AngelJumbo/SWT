@@ -1145,6 +1145,58 @@ public sealed class RenderingTests(ITestOutputHelper output)
         });
     }
 
+    [Fact]
+    public void SgrRenditionAttributesAffectRenderedCells()
+    {
+        OnSta(() =>
+        {
+            var appearance = Configuration.Parse("").Appearance with
+            {
+                FontFamily = "Consolas", Foreground = "#FFFFFF",
+                Background = "#000000", BackgroundOpacity = 1
+            };
+            static byte[] Pixels(string text, Appearance appearance, out int width, out int height)
+            {
+                var screen = new TerminalScreen(4, 1);
+                screen.Feed(Encoding.UTF8.GetBytes(text));
+                var view = new TerminalView(screen, appearance);
+                width = (int)Math.Ceiling(4 * view.CellWidth + 16);
+                height = (int)Math.Ceiling(view.CellHeight + 8);
+                var surface = BackgroundHost(view, appearance);
+                surface.Measure(new Size(width, height));
+                surface.Arrange(new Rect(0, 0, width, height));
+                var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+                bitmap.Render(surface);
+                var pixels = new byte[width * height * 4];
+                bitmap.CopyPixels(pixels, width * 4, 0);
+                return pixels;
+            }
+
+            var plain = Pixels("M", appearance, out var width, out var height);
+            foreach (var styled in new[] { "\x1b[2mM", "\x1b[3mM", "\x1b[1;3mM", "\x1b[9mM" })
+            {
+                var rendered = Pixels(styled, appearance, out _, out _);
+                Assert.False(plain.SequenceEqual(rendered), $"Expected visible change for {styled}");
+            }
+
+            static int BrightPixels(byte[] pixels, int width, int height, int column, double minY, double maxY)
+            {
+                var left = 8 + column * (width - 16) / 4;
+                var right = 8 + (column + 1) * (width - 16) / 4;
+                return Enumerable.Range((int)(minY * height), (int)((maxY - minY) * height))
+                    .SelectMany(y => Enumerable.Range(left, right - left).Select(x => (y * width + x) * 4))
+                    .Count(i => pixels[i + 2] > 200 && pixels[i + 1] > 200 && pixels[i] > 200);
+            }
+
+            var underline = Pixels("\x1b[4m ", appearance, out width, out height);
+            var reverse = Pixels("\x1b[7m ", appearance, out _, out _);
+            var underlineInk = BrightPixels(underline, width, height, 0, 0, 1);
+            var reverseFill = BrightPixels(reverse, width, height, 0, 0, 1);
+            Assert.True(underlineInk > 0);
+            Assert.True(reverseFill > underlineInk * 5);
+        });
+    }
+
     private static void OnSta(Action action)
     {
         Exception? error = null;

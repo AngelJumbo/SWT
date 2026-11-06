@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/SWT.Core/SWT.Core.csproj" />
+    <Project Path="src/SWT.Desktop/SWT.Desktop.csproj" />
+    <Project Path="src/SWT.Windows/SWT.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/SWT.Tests/SWT.Tests.csproj" />
+  </Folder>
+</Solution>

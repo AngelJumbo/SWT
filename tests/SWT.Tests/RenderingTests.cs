@@ -17,6 +17,32 @@ namespace SWT.Tests;
 public sealed class RenderingTests(ITestOutputHelper output)
 {
     [Fact]
+    public void OscTitlesUpdateWindowAndCustomChromeWithoutReplacingSession()
+    {
+        OnSta(() =>
+        {
+            var window = new MainWindow(Configuration.Parse(""), "", smoke: true);
+            var field = typeof(MainWindow).GetField("_screen",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            var screen = Assert.IsType<TerminalScreen>(field!.GetValue(window));
+            var root = Assert.IsType<Grid>(window.Content);
+            var frame = Assert.IsType<Border>(root.Children[0]);
+            var content = Assert.IsType<Grid>(frame.Child);
+            var title = Assert.IsType<Border>(content.Children[0]);
+            var chrome = Assert.IsType<Grid>(title.Child);
+            var titleContent = Assert.IsType<DockPanel>(chrome.Children[0]);
+            var titleText = Assert.IsType<TextBlock>(titleContent.Children[1]);
+            foreach (var text in new[] { "Editor", new string('x', 1024), "" })
+            {
+                screen.Feed(Encoding.UTF8.GetBytes($"\x1b]2;{text}\a"));
+                Assert.Equal(text.Length == 0 ? "SWT" : text, window.Title);
+                Assert.Equal(window.Title, titleText.Text);
+                Assert.Same(screen, field.GetValue(window));
+            }
+        });
+    }
+
+    [Fact]
     public void SearchToolbarUsesCompactIconsAndFitsMinimumWindowWidth()
     {
         OnSta(() =>
@@ -1142,6 +1168,24 @@ public sealed class RenderingTests(ITestOutputHelper output)
             Assert.Equal(expectedAlpha, pixels[(70 * 200 + 190) * 4 + 3]);
             Assert.Contains(Enumerable.Range(0, 200 * 40), i =>
                 pixels[i * 4 + 3] >= 240 && pixels[i * 4] >= 200);
+        });
+    }
+
+    [Fact]
+    public void FontSizeChangesCellSizeAndClamps()
+    {
+        OnSta(() =>
+        {
+            var appearance = Configuration.Parse("").Appearance with { FontFamily = "Consolas", FontSize = 12 };
+            var view = new TerminalView(new TerminalScreen(4, 1), appearance);
+            var width = view.CellWidth;
+            view.SetFontSize(24);
+            Assert.Equal(24, view.FontSize);
+            Assert.True(view.CellWidth > width);
+            view.SetFontSize(1000);
+            Assert.Equal(TerminalView.MaxFontSize, view.FontSize);
+            view.SetFontSize(1);
+            Assert.Equal(TerminalView.MinFontSize, view.FontSize);
         });
     }
 

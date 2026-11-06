@@ -93,6 +93,8 @@ public sealed class TerminalScreen
     private static readonly string?[] CharStrings = new string?[char.MaxValue + 1];
     private ParserState _state;
     private readonly StringBuilder _sequence = new();
+    private readonly StringBuilder _osc = new();
+    private bool _oscOverflow;
     private readonly Decoder _decoder = Encoding.UTF8.GetDecoder();
     private readonly int[] _args = new int[64];
     private bool[] _tabStops;
@@ -144,6 +146,7 @@ public sealed class TerminalScreen
     public long ResizeVersion { get; private set; }
 
     public event Action<string>? Reply;
+    public event Action<string>? TitleChanged;
 
     public string EncodePaste(string text)
     {
@@ -514,11 +517,20 @@ public sealed class TerminalScreen
                 else if (c == '\x1b') _state = ParserState.Escape;
                 return;
             case ParserState.Osc:
-                if (c == '\a') _state = ParserState.Text;
+                if (c == '\a') FinishOsc();
                 else if (c == '\x1b') _state = ParserState.OscEscape;
+                else AppendOsc(c);
                 return;
             case ParserState.OscEscape:
-                _state = c == '\\' ? ParserState.Text : ParserState.Osc;
+                if (c == '\\') FinishOsc();
+                else
+                {
+                    AppendOsc('\x1b');
+                    _state = ParserState.Osc;
+                    if (c == '\a') FinishOsc();
+                    else if (c == '\x1b') _state = ParserState.OscEscape;
+                    else AppendOsc(c);
+                }
                 return;
             case ParserState.Ignore:
                 if (c == '\x1b') _state = ParserState.IgnoreEscape;
@@ -534,7 +546,11 @@ public sealed class TerminalScreen
             switch (c)
             {
                 case '[': _sequence.Clear(); _state = ParserState.Csi; break;
-                case ']': _state = ParserState.Osc; break;
+                case ']':
+                    _osc.Clear();
+                    _oscOverflow = false;
+                    _state = ParserState.Osc;
+                    break;
                 case 'P': case '^': case '_': _state = ParserState.Ignore; break;
                 case '(':
                     _charsetTarget = 0;
@@ -582,6 +598,30 @@ public sealed class TerminalScreen
             : CharStrings[c] ??= c.ToString();
         _pendingHighSurrogate = null;
         Print(text);
+    }
+
+    private void AppendOsc(char c)
+    {
+        if (_osc.Length < 1026) _osc.Append(c);
+        else _oscOverflow = true;
+    }
+
+    private void FinishOsc()
+    {
+        _state = ParserState.Text;
+        if (!_oscOverflow && _osc.Length >= 2 && _osc[1] == ';' && _osc[0] is '0' or '2')
+        {
+            var title = new StringBuilder(_osc.Length - 2);
+            foreach (var rune in _osc.ToString(2, _osc.Length - 2).EnumerateRunes())
+            {
+                var category = Rune.GetUnicodeCategory(rune);
+                if (category is not (UnicodeCategory.Control or UnicodeCategory.Format or
+                    UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator))
+                    title.Append(rune.ToString());
+            }
+            TitleChanged?.Invoke(title.ToString());
+        }
+        _osc.Clear();
     }
 
     private void Print(string text)
@@ -837,6 +877,14 @@ public sealed class TerminalScreen
 
     private void Execute(char command)
     {
+        if (command == 'c')
+        {
+            if (_sequence.Length == 0 || _sequence.ToString() == "0")
+                Reply?.Invoke("\x1b[?1;0c");
+            else if (_sequence.ToString() is ">" or ">0")
+                Reply?.Invoke("\x1b[>0;0;0c");
+            return;
+        }
         if (_sequence.Length > 0 && _sequence[0] == '?')
         {
             if (command is 'h' or 'l') SetPrivateModes(command == 'h');

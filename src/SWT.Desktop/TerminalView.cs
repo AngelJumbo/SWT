@@ -117,6 +117,13 @@ public sealed class TerminalView : FrameworkElement
         MarkDirty();
     }
 
+    internal const double MinFontSize = 6, MaxFontSize = 72;
+
+    internal double FontSize => _appearance.FontSize;
+
+    internal void SetFontSize(double size) =>
+        Apply(_appearance with { FontSize = Math.Clamp(size, MinFontSize, MaxFontSize) });
+
     public void MarkDirty() => _dirty = true;
 
     internal void SetCompositionText(string text)

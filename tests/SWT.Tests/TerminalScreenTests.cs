@@ -1226,6 +1226,49 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
         Assert.StartsWith("OK!", screen.Line(0));
     }
 
+    [Theory]
+    [InlineData("0", "\a")]
+    [InlineData("2", "\x1b\\")]
+    public void OscTitlesWorkAtEveryUtf8Split(string command, string terminator)
+    {
+        var bytes = Encoding.UTF8.GetBytes($"\x1b]{command};Editor \u4e2d{terminator}OK");
+        for (var split = 0; split <= bytes.Length; split++)
+        {
+            var screen = new TerminalScreen(10, 2);
+            var titles = new List<string>();
+            screen.TitleChanged += titles.Add;
+            screen.Feed(bytes.AsSpan(0, split));
+            screen.Feed(bytes.AsSpan(split));
+            Assert.Equal(["Editor \u4e2d"], titles);
+            Assert.StartsWith("OK", screen.Line(0));
+            Assert.Equal(2, screen.CursorX);
+        }
+    }
+
+    [Fact]
+    public void OscTitlesSanitizeControlsAndIgnoreUnsupportedCommands()
+    {
+        var screen = new TerminalScreen(10, 2);
+        var titles = new List<string>();
+        screen.TitleChanged += titles.Add;
+        Feed(screen, "\x1b]2;a\tb\nc\u202Ed\x1b\\\x1b]52;c;secret\a\x1b]1;icon\a\x1b]2;\a");
+        Assert.Equal(["abcd", ""], titles);
+        Assert.Equal(0, screen.CursorX);
+    }
+
+    [Fact]
+    public void OscTitleLimitRejectsOversizedTitlesAndRecoversAfterCancellation()
+    {
+        var screen = new TerminalScreen(10, 2);
+        var titles = new List<string>();
+        screen.TitleChanged += titles.Add;
+        Feed(screen, "\x1b]2;" + new string('x', 1024) + "\a");
+        Feed(screen, "\x1b]2;" + new string('x', 1025) + "\x1b\\");
+        Feed(screen, "\x1b]2;cancelled\x18\x1b]0;valid\aOK");
+        Assert.Equal([new string('x', 1024), "valid"], titles);
+        Assert.StartsWith("OK", screen.Line(0));
+    }
+
     [Fact]
     public void CursorQueryRepliesWithCurrentPosition()
     {
@@ -1234,6 +1277,36 @@ public sealed class TerminalScreenTests(Xunit.Abstractions.ITestOutputHelper out
         screen.Reply += replies.Add;
         Feed(screen, "\x1b[3;4H\x1b[6n");
         Assert.Equal(["\x1b[3;4R"], replies);
+    }
+
+    [Theory]
+    [InlineData("\x1b[c", "\x1b[?1;0c")]
+    [InlineData("\x1b[0c", "\x1b[?1;0c")]
+    [InlineData("\x1b[>c", "\x1b[>0;0;0c")]
+    [InlineData("\x1b[>0c", "\x1b[>0;0;0c")]
+    public void DeviceAttributesQueriesReturnConservativeIdentification(string query, string expected)
+    {
+        var screen = new TerminalScreen(10, 4);
+        var replies = new List<string>();
+        screen.Reply += replies.Add;
+
+        Feed(screen, query);
+
+        Assert.Equal([expected], replies);
+        Assert.Equal("          ", screen.Line(0));
+    }
+
+    [Fact]
+    public void DeviceAttributesQueriesHandleSplitSequencesAndIgnoreUnsupportedParameters()
+    {
+        var screen = new TerminalScreen(10, 4);
+        var replies = new List<string>();
+        screen.Reply += replies.Add;
+        var query = Encoding.UTF8.GetBytes("\x1b[>0c\x1b[?c\x1b[>1c");
+        foreach (var value in query)
+            screen.Feed(new[] { value });
+
+        Assert.Equal(["\x1b[>0;0;0c"], replies);
     }
 
     [Fact]

@@ -152,22 +152,25 @@ public sealed class ConPtyTests
                     var text = output.ToString();
                     if (text.Contains("PS ", StringComparison.Ordinal) && text.Contains('>'))
                         initialPrompt.TrySetResult();
-                    var marker = text.IndexOf("SWT_READY", StringComparison.Ordinal);
-                    if (marker >= 0 && text.IndexOf("PS ", marker, StringComparison.Ordinal) is var promptAt &&
-                        promptAt >= 0 && text.IndexOf('>', promptAt) >= 0)
+                    var rows = Enumerable.Range(0, screen.Rows).Select(screen.Line).ToArray();
+                    var marker = Array.FindIndex(rows, row => row.TrimEnd() == "SWT_READY");
+                    if (marker >= 0 && rows.Skip(marker + 1).Any(row =>
+                        row.StartsWith("PS ", StringComparison.Ordinal) && row.Contains('>')))
                         commandPrompt.TrySetResult();
-                    if (marker >= 0 && text.IndexOf("dir", marker, StringComparison.Ordinal) is var typedAt &&
-                        typedAt >= 0)
+                    if (marker >= 0 && screen.Line(screen.CursorY).Contains("> dir", StringComparison.Ordinal))
                         typedCommand.TrySetResult();
                 }
                 return Task.CompletedTask;
             });
 
         await initialPrompt.Task.WaitAsync(TimeSpan.FromSeconds(20));
-        await session.WriteAsync("Get-ChildItem -Force | Out-Host; Write-Output 'SWT_READY'\r");
+        await session.WriteAsync("1..20 | ForEach-Object { \"SWT_LINE_$_\" }; Write-Output 'SWT_READY'\r");
         await commandPrompt.Task.WaitAsync(TimeSpan.FromSeconds(20));
-        session.Resize(79, 10);
-        screen.Resize(79, 10);
+        lock (output)
+        {
+            session.Resize(79, 10);
+            screen.Resize(79, 10);
+        }
         await Task.Delay(250);
         await session.WriteAsync("dir");
         await typedCommand.Task.WaitAsync(TimeSpan.FromSeconds(10));
@@ -177,8 +180,11 @@ public sealed class ConPtyTests
             var rows = Enumerable.Range(0, screen.Rows).Select(screen.Line).ToArray();
             var occurrences = rows.Sum(row => CountOccurrences(row, "dir"));
             Assert.Equal(1, occurrences);
-            Assert.Contains("dir", rows[^1]);
-            Assert.DoesNotContain(rows[..^1], row => row.Contains("dir", StringComparison.Ordinal));
+            Assert.Contains("> dir", rows[screen.CursorY]);
+            Assert.DoesNotContain(rows.Where((_, row) => row != screen.CursorY),
+                row => row.Contains("dir", StringComparison.Ordinal));
+            Assert.Contains(rows, row => row.TrimEnd() == "SWT_LINE_20");
+            Assert.Contains(rows, row => row.TrimEnd() == "SWT_READY");
         }
     }
 

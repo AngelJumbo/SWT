@@ -23,6 +23,7 @@ public sealed class MainWindow : Window
     private readonly TerminalScreen _screen;
     private readonly TerminalView _view;
     private readonly Border _title;
+    private readonly TextBlock _titleText;
     private readonly Border _windowFrame;
     private readonly Border _windowBorder;
     private readonly Grid _windowContent;
@@ -87,9 +88,9 @@ public sealed class MainWindow : Window
         var chrome = new Grid();
         chrome.ColumnDefinitions.Add(new ColumnDefinition());
         chrome.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var titleContent = new StackPanel
+        var titleContent = new DockPanel
         {
-            Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
             Margin = new Thickness(14, 0, 0, 0), IsHitTestVisible = false
         };
         titleContent.Children.Add(new TextBlock
@@ -98,12 +99,17 @@ public sealed class MainWindow : Window
             FontFamily = new FontFamily("Cascadia Mono"), FontSize = 12, FontWeight = FontWeights.Bold,
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0)
         });
-        titleContent.Children.Add(new TextBlock
+        _titleText = new TextBlock
         {
             Text = "SWT", Foreground = new SolidColorBrush(Color.FromRgb(216, 222, 233)),
             FontFamily = new FontFamily("Segoe UI"), FontSize = 12, FontWeight = FontWeights.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center
-        });
+            VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        titleContent.Children.Add(_titleText);
+        _screen.TitleChanged += title =>
+        {
+            if (!_closing && !_exited) SetWindowTitle(string.IsNullOrEmpty(title) ? "SWT" : title);
+        };
         chrome.Children.Add(titleContent);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
         buttons.Children.Add(Button("M 1,9 H 9", () => WindowState = WindowState.Minimized));
@@ -391,7 +397,7 @@ public sealed class MainWindow : Window
             if (_closing) return;
             DrainOutput();
             _exited = true;
-            Title = $"SWT - Session exited ({_session.ExitCode})";
+            SetWindowTitle($"SWT - Session exited ({_session.ExitCode})");
             _view.ToolTip = "Session exited. Close this window to exit.";
             if (_smoke)
             {
@@ -494,6 +500,12 @@ public sealed class MainWindow : Window
             LogState("resize-applied");
         }
         catch (ExternalException ex) { Status($"Resize failed: {ex.Message}"); }
+    }
+
+    private void SetWindowTitle(string title)
+    {
+        Title = title;
+        _titleText.Text = title;
     }
 
     private void Status(string text)
@@ -735,6 +747,23 @@ public sealed class MainWindow : Window
                 FindText(modifiers.HasFlag(ModifierKeys.Shift));
             }
             return;
+        }
+        if (modifiers is ModifierKeys.Control or (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            double? size = key switch
+            {
+                Key.OemPlus or Key.Add => _view.FontSize + 1,
+                Key.OemMinus or Key.Subtract => _view.FontSize - 1,
+                Key.D0 or Key.NumPad0 => _configuration.Appearance.FontSize,
+                _ => null
+            };
+            if (size is not null)
+            {
+                e.Handled = true;
+                _view.SetFontSize(size.Value);
+                ResizeTerminal();
+                return;
+            }
         }
         if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
         {

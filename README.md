@@ -88,6 +88,7 @@ change without recreating the HWND or restarting the shell.
 |---|---|
 | Reload configuration | Ctrl+Shift+R |
 | Toggle/recover title bar | Ctrl+Shift+D |
+| Increase / decrease / reset font size (session only; 6–72) | Ctrl+`+` / Ctrl+`-` / Ctrl+`0` |
 | Move window without title bar | Alt+left-drag |
 | Resize | Drag window edges/corners |
 | Interrupt shell command | Ctrl+C |
@@ -179,6 +180,8 @@ match-enumeration budget; exceeding a limit reports an error, not partial result
   application-cursor mode and Shift, Alt, and Ctrl combinations.
 - SGR text attributes: bold, dim, italic, underline, reverse video, and
   strikethrough, with independent reset codes.
+- Primary and secondary device-attributes queries receive conservative generic
+  replies; these do not claim full VT100 or xterm compatibility.
 - Bounded scrollback with wheel/keyboard navigation and width reflow of the main
   buffer and retained history. Soft wraps are reassembled; explicit line breaks,
   cell colors and Unicode cells are retained. The alternate screen remains a
@@ -206,8 +209,11 @@ match-enumeration budget; exceeding a limit reports an error, not partial result
 - **IME:** composition/pre-edit display and committed input are implemented;
   candidate-window placement still needs manual validation.
 - **Accessibility:** no accessibility text provider for terminal contents yet.
-- **OSC:** strings are discarded, including window-title, hyperlink and clipboard
-  requests; they have no clipboard or process side effects.
+- **OSC:** `OSC 0` and `OSC 2` update the window and custom title bar (BEL or
+  `ESC \` terminators). Titles are limited to 1,024 UTF-16 code units; oversized
+  titles are ignored. Control and formatting characters are removed; an empty
+  title restores `SWT`. Hyperlink, clipboard and other OSC requests remain ignored
+  and have no clipboard or process side effects.
 
 ### Full-screen terminal applications
 
@@ -287,3 +293,5 @@ returns a nonzero exit code on failure. It does not modify user configuration.
 Tests run Windows-only ConPTY integration, 100 measured start/close cycles after
 warmup, and post-GC native-handle plateau checks. They also render text over
 opacity `0.0`, `0.5`, and `1.0` into a bitmap and check actual pixel alpha.
+The PowerShell resize/input regression uses deterministic output and checks
+the host-positioned prompt rather than assuming it occupies the bottom row.

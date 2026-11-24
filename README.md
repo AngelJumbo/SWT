@@ -76,7 +76,7 @@ individual Windows arguments, not a command line to split.
   Live reload applies a new limit, keeping the newest lines.
 - Font size: 6 to 72 WPF device-independent pixels.
 - Colors: `#RRGGBB`; ANSI palette: exactly 16 entries.
-- Shell and initial dimensions apply next launch.
+- Shell settings apply to new tabs and the next launch; initial dimensions apply next launch.
 - Appearance changes are live; missing fonts are reported and fall back to Consolas.
 - Unknown keys and incorrect types are errors.
 
@@ -88,7 +88,9 @@ change without recreating the HWND or restarting the shell.
 | Action | Shortcut |
 |---|---|
 | Reload configuration | Ctrl+Shift+R |
-| Toggle/recover title bar | Ctrl+Shift+D |
+| Toggle/recover window decorations | Ctrl+Shift+D |
+| New tab / close tab | Ctrl+Shift+T / Ctrl+Shift+W |
+| Next / previous tab | Ctrl+Tab / Ctrl+Shift+Tab |
 | Increase / decrease / reset font size (session only; 6–72) | Ctrl+`+` / Ctrl+`-` / Ctrl+`0` |
 | Move window without title bar | Alt+left-drag |
 | Resize | Drag window edges/corners |
@@ -102,6 +104,17 @@ change without recreating the HWND or restarting the shell.
 | Scroll history by page | Shift+PageUp / Shift+PageDown |
 | Jump to oldest / live output | Shift+Home / Shift+End |
 | Close | Alt+F4 or title-bar close |
+
+Each tab has its own shell, screen, and scrollback. Closing the last tab closes
+the window; an exited shell stays visible until its tab is closed. With window
+decorations enabled, tabs share the title bar with the window controls. With
+decorations hidden, a shorter tab strip without icons appears only when there
+are multiple tabs.
+Drag empty title-bar space to move the window when decorations are enabled.
+Tabs shrink to fit; use the mouse wheel over the tabs to scroll once the strip
+overflows. Switching tabs closes the search bar; reopen it to search the
+selected tab.
+
 
 Typing or pasting returns the view to live output. While scrolled back, new output
 keeps the view anchored, a thumb on the right edge shows the position, and the
@@ -133,6 +146,8 @@ match-enumeration budget; exceeding a limit reports an error, not partial result
 
 - ConPTY shell with UTF-8 streaming, ordered input, resize, exit reporting,
   and job-owned child-process cleanup.
+- Independent terminal tabs with per-tab titles and output, keyboard navigation,
+  and a compact tab strip that adapts to window decorations.
 - WPF cell rendering, cursor, basic ANSI cursor/erase commands, SGR attributes,
   16/256/RGB colors, and device-status replies.
 - Separate main and alternate screens for DEC modes 47, 1047, and 1049; mode

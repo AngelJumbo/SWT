@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -20,10 +21,18 @@ public sealed class MainWindow : Window
     private Configuration _configuration;
     private readonly string _configPath;
     private readonly bool _smoke;
-    private readonly TerminalScreen _screen;
-    private readonly TerminalView _view;
+    private TerminalScreen _screen;
+    private TerminalView _view;
     private readonly Border _title;
-    private readonly TextBlock _titleText;
+    private readonly StackPanel _tabButtons;
+    private readonly ScrollViewer _tabScroller;
+    private readonly DockPanel _tabsArea;
+    private readonly Button _newTabButton;
+    private readonly StackPanel _captionButtons;
+    private readonly List<TerminalTab> _tabs = [];
+    private readonly List<Task> _tabClosures = [];
+    private TerminalTab _activeTab;
+    private bool _decorationsVisible;
     private readonly Border _windowFrame;
     private readonly Border _windowBorder;
     private readonly Grid _windowContent;
@@ -36,22 +45,40 @@ public sealed class MainWindow : Window
     private CheckBox _regexSearch = null!;
     private readonly DispatcherTimer _reloadTimer;
     private readonly FileSystemWatcher? _watcher;
-    private readonly List<string> _replies = [];
-    private ConPtySession? _session;
-    private bool _closing, _closed, _exited;
+    private ConPtySession? _session => _activeTab.Session;
+    private bool _exited => _activeTab.Exited;
+    private int? _ptyColumns => _activeTab.PtyColumns;
+    private int? _ptyRows => _activeTab.PtyRows;
+    private bool _closing, _closed;
     private bool _rightClickHandledLocally;
     private string? _fontWarning;
     private readonly DispatcherTimer _smokeTimeout;
-    // ConPTY output is coalesced so the UI thread parses large batches once instead of one dispatch per read.
     private const int MaxPendingOutput = 1 << 20;
-    private readonly Lock _outputLock = new();
-    private byte[] _incoming = new byte[65536], _spare = new byte[65536];
-    private int _incomingLength;
-    private bool _drainQueued;
-    private TaskCompletionSource? _drainWaiter;
     private DiagnosticLog? _diagnostics;
-    private int? _ptyColumns, _ptyRows;
     private (double Width, double Height, double ViewWidth, double ViewHeight)? _lastLayout;
+
+    private sealed class TerminalTab(TerminalScreen screen, TerminalView view)
+    {
+        public TerminalScreen Screen { get; } = screen;
+        public TerminalView View { get; } = view;
+        public ConPtySession? Session { get; set; }
+        public int? PtyColumns { get; set; }
+        public int? PtyRows { get; set; }
+        public bool Exited { get; set; }
+        public bool Closing { get; set; }
+        public TaskCompletionSource? StartPending { get; set; }
+        public string Title { get; set; } = "SWT";
+        public Border Header { get; set; } = null!;
+        public TextBlock Label { get; set; } = null!;
+        public TextBlock Icon { get; set; } = null!;
+        public Button CloseButton { get; set; } = null!;
+        public List<string> Replies { get; } = [];
+        public Lock OutputLock { get; } = new();
+        public byte[] Incoming = new byte[65536], Spare = new byte[65536];
+        public int IncomingLength;
+        public bool DrainQueued;
+        public TaskCompletionSource? DrainWaiter;
+    }
 
     public MainWindow(Configuration configuration, string configPath, bool smoke)
         : this(configuration, configPath, smoke, null) { }
@@ -76,11 +103,12 @@ public sealed class MainWindow : Window
         WindowChrome.SetWindowChrome(this, _windowChrome);
         _screen = new TerminalScreen(configuration.Appearance.Columns, configuration.Appearance.Rows,
             configuration.Terminal.ScrollbackLines);
-        _screen.Reply += _replies.Add;
         diagnostics?.WriteStartup("font-check-starting");
         var appearance = CheckFont(configuration.Appearance);
         diagnostics?.WriteStartup("font-checked");
         _view = new TerminalView(_screen, appearance);
+        _activeTab = new TerminalTab(_screen, _view);
+        _tabs.Add(_activeTab);
         diagnostics?.WriteStartup("view-created");
         Width = configuration.Appearance.Columns * _view.CellWidth + 28;
         Height = configuration.Appearance.Rows * _view.CellHeight + 52 + ResizeBorderSize * 2;
@@ -91,36 +119,34 @@ public sealed class MainWindow : Window
         var chrome = new Grid();
         chrome.ColumnDefinitions.Add(new ColumnDefinition());
         chrome.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var titleContent = new DockPanel
+        _tabsArea = new DockPanel { LastChildFill = true, Background = Brushes.Transparent };
+        _newTabButton = CaptionButton("M 1,5 H 9 M 5,1 V 9", () => AddTab());
+        _newTabButton.ToolTip = "New tab (Ctrl+Shift+T)";
+        System.Windows.Automation.AutomationProperties.SetName(_newTabButton, "New tab");
+        DockPanel.SetDock(_newTabButton, Dock.Right);
+        _tabsArea.Children.Add(_newTabButton);
+        _tabButtons = new StackPanel { Orientation = Orientation.Horizontal };
+        _tabScroller = new ScrollViewer
         {
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(14, 0, 0, 0), IsHitTestVisible = false
+            Content = _tabButtons, HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            HorizontalAlignment = HorizontalAlignment.Left
         };
-        titleContent.Children.Add(new TextBlock
+        _tabScroller.PreviewMouseWheel += (_, e) =>
         {
-            Text = ">_", Foreground = new SolidColorBrush(Color.FromRgb(129, 161, 193)),
-            FontFamily = new FontFamily("Cascadia Mono"), FontSize = 12, FontWeight = FontWeights.Bold,
-            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 10, 0)
-        });
-        _titleText = new TextBlock
-        {
-            Text = "SWT", Foreground = new SolidColorBrush(Color.FromRgb(216, 222, 233)),
-            FontFamily = new FontFamily("Segoe UI"), FontSize = 12, FontWeight = FontWeights.SemiBold,
-            VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis
+            _tabScroller.ScrollToHorizontalOffset(_tabScroller.HorizontalOffset - e.Delta);
+            e.Handled = true;
         };
-        titleContent.Children.Add(_titleText);
-        _screen.TitleChanged += title =>
-        {
-            if (!_closing && !_exited) SetWindowTitle(string.IsNullOrEmpty(title) ? "SWT" : title);
-        };
-        chrome.Children.Add(titleContent);
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal };
-        buttons.Children.Add(CaptionButton("M 1,9 H 9", () => WindowState = WindowState.Minimized));
+        _tabsArea.Children.Add(_tabScroller);
+        _tabsArea.SizeChanged += (_, _) => UpdateTabLayout();
+        chrome.Children.Add(_tabsArea);
+        _captionButtons = new StackPanel { Orientation = Orientation.Horizontal };
+        _captionButtons.Children.Add(CaptionButton("M 1,9 H 9", () => WindowState = WindowState.Minimized));
         _maximizeButton = CaptionButton("M 1,1 H 9 V 9 H 1 Z", ToggleMaximize);
-        buttons.Children.Add(_maximizeButton);
-        buttons.Children.Add(CaptionButton("M 2,2 L 8,8 M 8,2 L 2,8", Close, isClose: true));
-        Grid.SetColumn(buttons, 1);
-        chrome.Children.Add(buttons);
+        _captionButtons.Children.Add(_maximizeButton);
+        _captionButtons.Children.Add(CaptionButton("M 2,2 L 8,8 M 8,2 L 2,8", Close, isClose: true));
+        Grid.SetColumn(_captionButtons, 1);
+        chrome.Children.Add(_captionButtons);
         _title = new Border
         {
             Child = chrome, Height = 36,
@@ -159,12 +185,9 @@ public sealed class MainWindow : Window
         _frameContent.SizeChanged += (_, _) =>
             ClipFrameContent(Math.Max(0, _configuration.Appearance.CornerRadius - ResizeBorderSize));
         Content = _windowContent;
-        _title.Visibility = appearance.Decorations ? Visibility.Visible : Visibility.Collapsed;
-        _view.SizeChanged += (_, _) =>
-        {
-            LogState("view-size-changed");
-            ResizeTerminal();
-        };
+        _decorationsVisible = appearance.Decorations;
+        InitializeTab(_activeTab);
+        UpdateTabBar();
         if (diagnostics is not null)
         {
             SourceInitialized += (_, _) => LogState("source-initialized");
@@ -177,40 +200,10 @@ public sealed class MainWindow : Window
                 LogState("layout-updated");
             };
         }
-        _view.GotKeyboardFocus += (_, _) => _view.MarkDirty();
-        _view.LostKeyboardFocus += (_, _) => _view.MarkDirty();
         Activated += async (_, _) => await SendFocusEvent(true);
         Deactivated += async (_, _) => await SendFocusEvent(false);
-        _view.MouseLeftButtonDown += (_, e) =>
-        {
-            if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) DragMove();
-            else
-            {
-                _view.Focus();
-                _view.BeginSelection(e.GetPosition(_view));
-            }
-            e.Handled = true;
-        };
-        _view.MouseMove += (_, e) =>
-        {
-            if (_view.IsSelecting) _view.UpdateSelection(e.GetPosition(_view));
-        };
-        _view.MouseLeftButtonUp += (_, e) =>
-        {
-            _view.EndSelection(e.GetPosition(_view));
-            e.Handled = true;
-        };
-        _view.PreviewMouseDown += MouseDownTerminal;
-        _view.PreviewMouseUp += MouseUpTerminal;
-        _view.PreviewMouseMove += MouseMoveTerminal;
-        _view.PreviewMouseWheel += MouseWheelTerminal;
         PreviewKeyDown += KeyDownTerminal;
-        _view.TextInput += async (_, e) =>
-        {
-            e.Handled = true;
-            await Send(e.Text);
-        };
-        Loaded += async (_, _) => await StartSession();
+        Loaded += async (_, _) => await StartSession(_activeTab);
         LogState("constructed");
         Closing += CloseWindow;
         _reloadTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(300) };
@@ -234,6 +227,258 @@ public sealed class MainWindow : Window
 
     private void ToggleMaximize() =>
         WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
+
+    private void InitializeTab(TerminalTab tab)
+    {
+        tab.Screen.Reply += tab.Replies.Add;
+        tab.Screen.TitleChanged += title =>
+        {
+            if (_closing || tab.Closing || tab.Exited) return;
+            tab.Title = string.IsNullOrEmpty(title) ? "SWT" : title;
+            tab.Label.Text = tab.Title;
+            tab.Header.ToolTip = tab.Title;
+            if (tab == _activeTab) Title = tab.Title;
+        };
+        var view = tab.View;
+        view.SizeChanged += (_, _) =>
+        {
+            if (tab != _activeTab) return;
+            LogState("view-size-changed");
+            ResizeTerminal();
+        };
+        view.GotKeyboardFocus += (_, _) => view.MarkDirty();
+        view.LostKeyboardFocus += (_, _) => view.MarkDirty();
+        view.MouseLeftButtonDown += (_, e) =>
+        {
+            if (Keyboard.Modifiers.HasFlag(ModifierKeys.Alt)) DragMove();
+            else
+            {
+                view.Focus();
+                view.BeginSelection(e.GetPosition(view));
+            }
+            e.Handled = true;
+        };
+        view.MouseMove += (_, e) =>
+        {
+            if (view.IsSelecting) view.UpdateSelection(e.GetPosition(view));
+        };
+        view.MouseLeftButtonUp += (_, e) =>
+        {
+            view.EndSelection(e.GetPosition(view));
+            e.Handled = true;
+        };
+        view.PreviewMouseDown += MouseDownTerminal;
+        view.PreviewMouseUp += MouseUpTerminal;
+        view.PreviewMouseMove += MouseMoveTerminal;
+        view.PreviewMouseWheel += MouseWheelTerminal;
+        view.TextInput += async (_, e) =>
+        {
+            e.Handled = true;
+            await Send(e.Text);
+        };
+
+        tab.Label = new TextBlock
+        {
+            Text = tab.Title, Foreground = new SolidColorBrush(Color.FromRgb(216, 222, 233)),
+            FontFamily = new FontFamily("Segoe UI"), FontSize = 12,
+            VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(6, 0, 0, 0)
+        };
+        var headerContent = new Grid();
+        headerContent.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        headerContent.ColumnDefinitions.Add(new ColumnDefinition());
+        headerContent.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        tab.Icon = new TextBlock
+        {
+            Text = ">_", Foreground = new SolidColorBrush(Color.FromRgb(129, 161, 193)),
+            FontFamily = new FontFamily("Cascadia Mono"), FontSize = 12, FontWeight = FontWeights.Bold,
+            VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(10, 0, 0, 0)
+        };
+        headerContent.Children.Add(tab.Icon);
+        Grid.SetColumn(tab.Label, 1);
+        headerContent.Children.Add(tab.Label);
+        var close = CaptionButton("M 2,2 L 8,8 M 8,2 L 2,8", () => _ = CloseTabAsync(tab));
+        close.Width = 28;
+        close.Height = 30;
+        tab.CloseButton = close;
+        close.ToolTip = "Close tab (Ctrl+Shift+W)";
+        System.Windows.Automation.AutomationProperties.SetName(close, "Close tab");
+        Grid.SetColumn(close, 2);
+        headerContent.Children.Add(close);
+        tab.Header = new Border
+        {
+            Child = headerContent, Width = 160, Height = 32, Margin = new Thickness(3, 3, 0, 0),
+            CornerRadius = new CornerRadius(5, 5, 0, 0), ToolTip = tab.Title
+        };
+        var headerStyle = new Style(typeof(Border));
+        headerStyle.Setters.Add(new Setter(Border.BackgroundProperty, Brushes.Transparent));
+        var inactiveHover = new Trigger { Property = IsMouseOverProperty, Value = true };
+        inactiveHover.Setters.Add(new Setter(Border.BackgroundProperty,
+            new SolidColorBrush(Color.FromRgb(45, 51, 61))));
+        headerStyle.Triggers.Add(inactiveHover);
+        var selected = new Trigger { Property = TagProperty, Value = true };
+        selected.Setters.Add(new Setter(Border.BackgroundProperty,
+            new SolidColorBrush(Color.FromRgb(54, 61, 73))));
+        headerStyle.Triggers.Add(selected);
+        tab.Header.Style = headerStyle;
+        var closeStyle = new Style(typeof(Button));
+        closeStyle.Setters.Add(new Setter(VisibilityProperty, Visibility.Hidden));
+        var active = new DataTrigger
+        {
+            Binding = new System.Windows.Data.Binding(nameof(Tag)) { Source = tab.Header },
+            Value = true
+        };
+        active.Setters.Add(new Setter(VisibilityProperty, Visibility.Visible));
+        closeStyle.Triggers.Add(active);
+        var headerHover = new DataTrigger
+        {
+            Binding = new System.Windows.Data.Binding(nameof(IsMouseOver)) { Source = tab.Header },
+            Value = true
+        };
+        headerHover.Setters.Add(new Setter(VisibilityProperty, Visibility.Visible));
+        closeStyle.Triggers.Add(headerHover);
+        close.Style = closeStyle;
+        tab.Header.MouseLeftButtonDown += (_, e) =>
+        {
+            e.Handled = true;
+            SelectTab(tab);
+        };
+        _tabButtons.Children.Add(tab.Header);
+    }
+
+    internal void AddTab()
+    {
+        if (_closing) return;
+        var screen = new TerminalScreen(_screen.Columns, _screen.Rows, _configuration.Terminal.ScrollbackLines);
+        var view = new TerminalView(screen, CheckFont(_configuration.Appearance));
+        var tab = new TerminalTab(screen, view);
+        _tabs.Add(tab);
+        InitializeTab(tab);
+        SelectTab(tab);
+        UpdateTabBar();
+        if (IsLoaded)
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (!_closing && !tab.Closing) _ = StartSession(tab);
+            }, DispatcherPriority.Loaded);
+    }
+
+    private void SelectTab(TerminalTab tab)
+    {
+        if (_closing || tab.Closing || tab == _activeTab) return;
+        var previous = _activeTab;
+        if (IsActive) _ = SendFocusEvent(previous, false);
+        if (_searchBar?.Visibility == Visibility.Visible)
+        {
+            previous.View.ClearSearch();
+            _searchBar.Visibility = Visibility.Collapsed;
+            _searchStatus.Text = "";
+            _searchStatus.Visibility = Visibility.Collapsed;
+        }
+        _frameContent.Children.Remove(previous.View);
+        _activeTab = tab;
+        _screen = tab.Screen;
+        _view = tab.View;
+        Grid.SetRow(_view, 1);
+        _frameContent.Children.Add(_view);
+        _rightClickHandledLocally = false;
+        Title = tab.Title;
+        UpdateTabBar();
+        _view.Focus();
+        if (IsActive) _ = SendFocusEvent(tab, true);
+        Dispatcher.BeginInvoke(() =>
+        {
+            if (!_closing && tab == _activeTab)
+            {
+                ResizeTerminal();
+                tab.Header.BringIntoView();
+            }
+        }, DispatcherPriority.Loaded);
+    }
+
+    internal void SelectRelativeTab(int direction)
+    {
+        if (_tabs.Count < 2) return;
+        var index = (_tabs.IndexOf(_activeTab) + direction + _tabs.Count) % _tabs.Count;
+        SelectTab(_tabs[index]);
+    }
+
+    internal void ToggleDecorations()
+    {
+        _decorationsVisible = !_decorationsVisible;
+        UpdateTabBar();
+    }
+
+    private async Task CloseTabAsync(TerminalTab tab)
+    {
+        if (_closing || tab.Closing) return;
+        if (_tabs.Count == 1) { Close(); return; }
+        tab.Closing = true;
+        var index = _tabs.IndexOf(tab);
+        if (tab == _activeTab)
+            SelectTab(_tabs[index == _tabs.Count - 1 ? index - 1 : index + 1]);
+        _tabs.Remove(tab);
+        _tabButtons.Children.Remove(tab.Header);
+        UpdateTabBar();
+        var disposal = DisposeTabAsync(tab);
+        _tabClosures.Add(disposal);
+        try { await disposal; }
+        finally { _tabClosures.Remove(disposal); }
+    }
+
+    private async Task DisposeTabAsync(TerminalTab tab)
+    {
+        try
+        {
+            if (tab.StartPending is not null) await tab.StartPending.Task;
+            if (tab.Session is not null) await tab.Session.DisposeAsync();
+        }
+        catch (Exception ex) when (ex is IOException or Win32Exception or ExternalException)
+        {
+            Status($"Tab shutdown failed: {ex.Message}");
+            Tag = 1;
+        }
+    }
+
+    private void UpdateTabBar()
+    {
+        _title.Visibility = _decorationsVisible || _tabs.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        _captionButtons.Visibility = _decorationsVisible ? Visibility.Visible : Visibility.Collapsed;
+        _title.Height = _decorationsVisible ? 36 : 26;
+        _newTabButton.Height = _decorationsVisible ? 35 : 25;
+        foreach (Button button in _captionButtons.Children)
+            button.Height = 35;
+        foreach (var tab in _tabs)
+        {
+            tab.Header.Tag = tab == _activeTab;
+            tab.Header.Height = _decorationsVisible ? 32 : 22;
+            tab.CloseButton.Height = _decorationsVisible ? 30 : 20;
+            tab.Icon.Visibility = _decorationsVisible ? Visibility.Visible : Visibility.Collapsed;
+            tab.Label.Margin = new Thickness(_decorationsVisible ? 6 : 10, 0, 0, 0);
+        }
+        UpdateTabLayout();
+    }
+
+    private void UpdateTabLayout()
+    {
+        if (_tabsArea.ActualWidth <= 0 || _tabs.Count == 0) return;
+        const double tabMargin = 3;
+        const double dragSpace = 48;
+        var available = Math.Max(0, _tabsArea.ActualWidth - _newTabButton.Width
+            - (_decorationsVisible ? dragSpace : 0));
+        var tabWidth = Math.Clamp(available / _tabs.Count - tabMargin, 72, 160);
+        var scrollerWidth = Math.Min(available, _tabs.Count * (tabWidth + tabMargin));
+        var changed = _tabScroller.Width != scrollerWidth ||
+            _tabs.Any(tab => tab.Header.Width != tabWidth);
+        if (!changed) return;
+        foreach (var tab in _tabs) tab.Header.Width = tabWidth;
+        _tabScroller.Width = scrollerWidth;
+        if (IsLoaded)
+            Dispatcher.BeginInvoke(() =>
+            {
+                if (!_closing && _title.Visibility == Visibility.Visible) _activeTab.Header.BringIntoView();
+            }, DispatcherPriority.Loaded);
+    }
 
     private static Button CaptionButton(string geometry, Action action, bool isClose = false)
     {
@@ -345,7 +590,8 @@ public sealed class MainWindow : Window
             Binding = new System.Windows.Data.Binding(nameof(Visibility)) { Source = _title },
             Value = Visibility.Visible
         };
-        titleVisible.Setters.Add(new Setter(MarginProperty, new Thickness(12, _title.Height + 12, 12, 12)));
+        titleVisible.Setters.Add(new Setter(MarginProperty,
+            new System.Windows.Data.Binding(nameof(Height)) { Source = _title, Converter = new TitleSearchMarginConverter() }));
         searchBarStyle.Triggers.Add(titleVisible);
         searchBar.Style = searchBarStyle;
         _windowContent.Children.Add(searchBar);
@@ -358,6 +604,15 @@ public sealed class MainWindow : Window
         _searchBar.Visibility = Visibility.Visible;
         _searchBox.Focus();
         _searchBox.SelectAll();
+    }
+
+    private sealed class TitleSearchMarginConverter : System.Windows.Data.IValueConverter
+    {
+        public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+            new Thickness(12, (double)value + 12, 12, 12);
+
+        public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+            throw new NotSupportedException();
     }
 
     private static Button SearchButton(string geometry, string label, Action action)
@@ -402,110 +657,131 @@ public sealed class MainWindow : Window
         return appearance with { FontFamily = "Consolas" };
     }
 
-    private async Task StartSession()
+    private async Task StartSession(TerminalTab tab)
     {
+        tab.StartPending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
-            LogState("loaded");
-            ResizeTerminal();
+            if (tab == _activeTab)
+            {
+                LogState("loaded");
+                ResizeTerminal();
+            }
             var executable = ShellResolver.Resolve(_smoke ? "" : _configuration.Shell.Executable);
             IReadOnlyList<string> arguments = _smoke
                 ? ["-NoLogo", "-NoProfile", "-Command", "Write-Output 'SWT_SMOKE'; exit 0"]
                 : _configuration.Shell.Arguments;
             var directory = string.IsNullOrEmpty(_configuration.Shell.WorkingDirectory)
                 ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) : _configuration.Shell.WorkingDirectory;
-            var columns = _screen.Columns;
-            var rows = _screen.Rows;
+            var columns = tab.Screen.Columns;
+            var rows = tab.Screen.Rows;
             LogState("conpty-starting");
-            _session = ConPtySession.Start(executable, arguments, directory, columns, rows, QueueOutput);
-            _ptyColumns = columns;
-            _ptyRows = rows;
+            var session = ConPtySession.Start(executable, arguments, directory, columns, rows,
+                bytes => QueueOutput(tab, bytes));
+            tab.Session = session;
+            tab.StartPending.TrySetResult();
+            if (_closing || tab.Closing)
+                return;
+            tab.PtyColumns = columns;
+            tab.PtyRows = rows;
             LogState("conpty-started");
             // Native startup can pump window messages while the tiling manager changes the layout.
-            ResizeTerminal();
-            _view.Focus();
+            if (tab == _activeTab) { ResizeTerminal(); _view.Focus(); }
             if (_fontWarning is not null) Status(_fontWarning);
             if (_smoke) _smokeTimeout.Start();
-            await _session.Completion;
-            if (_closing) return;
-            DrainOutput();
-            _exited = true;
-            SetWindowTitle($"SWT - Session exited ({_session.ExitCode})");
-            _view.ToolTip = "Session exited. Close this window to exit.";
+            await tab.Session.Completion;
+            if (_closing || tab.Closing) return;
+            DrainOutput(tab);
+            tab.Exited = true;
+            tab.Title = $"SWT - Session exited ({tab.Session.ExitCode})";
+            tab.Label.Text = tab.Title;
+            tab.Header.ToolTip = tab.Title;
+            if (tab == _activeTab) Title = tab.Title;
+            tab.View.ToolTip = "Session exited. Close this tab to exit.";
             if (_smoke)
             {
                 _smokeTimeout.Stop();
-                var found = Enumerable.Range(0, _screen.ScrollbackCount + _screen.Rows)
-                    .Any(y => _screen.GetViewportLine(y, _screen.ScrollbackCount).Text(_screen.Columns)
+                var found = Enumerable.Range(0, tab.Screen.ScrollbackCount + tab.Screen.Rows)
+                    .Any(y => tab.Screen.GetViewportLine(y, tab.Screen.ScrollbackCount).Text(tab.Screen.Columns)
                         .Contains("SWT_SMOKE", StringComparison.Ordinal));
                 Application.Current.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-                Tag = found && _session.ExitCode == 0 ? 0 : 1;
+                Tag = found && tab.Session.ExitCode == 0 ? 0 : 1;
                 Close();
             }
         }
         catch (Exception ex) when (ex is Win32Exception or IOException or ArgumentException or ExternalException or InvalidOperationException)
         {
-            _exited = true;
+            if (_closing || tab.Closing) return;
+            tab.Exited = true;
+            tab.Title = "SWT - Session failed";
+            tab.Label.Text = tab.Title;
+            tab.Header.ToolTip = tab.Title;
+            if (tab == _activeTab) Title = tab.Title;
             Status($"Session failed: {ex.Message}");
             if (_smoke) { Tag = 1; Close(); }
         }
+        finally
+        {
+            tab.StartPending.TrySetResult();
+        }
     }
 
-    private Task QueueOutput(ReadOnlyMemory<byte> bytes)
+    private Task QueueOutput(TerminalTab tab, ReadOnlyMemory<byte> bytes)
     {
         var wait = Task.CompletedTask;
         var schedule = false;
-        lock (_outputLock)
+        lock (tab.OutputLock)
         {
-            if (_incomingLength + bytes.Length > _incoming.Length)
-                Array.Resize(ref _incoming, Math.Max(_incoming.Length * 2, _incomingLength + bytes.Length));
-            bytes.Span.CopyTo(_incoming.AsSpan(_incomingLength));
-            _incomingLength += bytes.Length;
-            if (!_drainQueued) _drainQueued = schedule = true;
+            if (tab.IncomingLength + bytes.Length > tab.Incoming.Length)
+                Array.Resize(ref tab.Incoming, Math.Max(tab.Incoming.Length * 2, tab.IncomingLength + bytes.Length));
+            bytes.Span.CopyTo(tab.Incoming.AsSpan(tab.IncomingLength));
+            tab.IncomingLength += bytes.Length;
+            if (!tab.DrainQueued) tab.DrainQueued = schedule = true;
             // Backpressure: the reader pauses until the UI catches up.
-            if (_incomingLength >= MaxPendingOutput)
-                wait = (_drainWaiter ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+            if (tab.IncomingLength >= MaxPendingOutput)
+                wait = (tab.DrainWaiter ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
         }
-        if (schedule) Dispatcher.BeginInvoke(DrainOutput, DispatcherPriority.Background);
+        if (schedule) Dispatcher.BeginInvoke(() => DrainOutput(tab), DispatcherPriority.Background);
         return wait;
     }
 
-    private void DrainOutput()
+    private void DrainOutput(TerminalTab tab)
     {
         byte[] data;
         int length;
         TaskCompletionSource? waiter;
-        lock (_outputLock)
+        lock (tab.OutputLock)
         {
-            data = _incoming;
-            length = _incomingLength;
-            _incoming = _spare;
-            _incomingLength = 0;
-            _drainQueued = false;
-            waiter = _drainWaiter;
-            _drainWaiter = null;
+            data = tab.Incoming;
+            length = tab.IncomingLength;
+            tab.Incoming = tab.Spare;
+            tab.IncomingLength = 0;
+            tab.DrainQueued = false;
+            waiter = tab.DrainWaiter;
+            tab.DrainWaiter = null;
         }
-        if (length > 0)
+        if (length > 0 && !tab.Closing && !_closing)
         {
-            LogState("output-before", length, ControlSequences(data.AsSpan(0, length)));
-            _screen.Feed(data.AsSpan(0, length));
-            _view.ScreenChanged();
-            LogState("output-after", length);
+            if (tab == _activeTab) LogState("output-before", length, ControlSequences(data.AsSpan(0, length)));
+            tab.Screen.Feed(data.AsSpan(0, length));
+            tab.View.ScreenChanged();
+            if (tab == _activeTab) LogState("output-after", length);
         }
-        _spare = data.Length > 4 * 65536 ? new byte[65536] : data;
+        tab.Spare = data.Length > 4 * 65536 ? new byte[65536] : data;
         waiter?.TrySetResult();
-        if (_replies.Count == 0) return;
-        string[] replies = [.. _replies];
-        _replies.Clear();
-        _ = SendReplies(replies);
+        if (tab.Replies.Count == 0) return;
+        string[] replies = [.. tab.Replies];
+        tab.Replies.Clear();
+        _ = SendReplies(tab, replies);
     }
 
-    private async Task SendReplies(string[] replies)
+    private async Task SendReplies(TerminalTab tab, string[] replies)
     {
         try
         {
             foreach (var reply in replies)
-                if (_session is not null && !_closing && !_exited) await _session.WriteAsync(reply);
+                if (tab.Session is not null && !_closing && !tab.Closing && !tab.Exited)
+                    await tab.Session.WriteAsync(reply);
         }
         catch (Exception ex) when (ex is IOException or System.Threading.Channels.ChannelClosedException or ObjectDisposedException)
         { Status($"Reply failed: {ex.Message}"); }
@@ -523,7 +799,7 @@ public sealed class MainWindow : Window
         try
         {
             if (!conptyMatches) _session!.Resize(columns, rows);
-            if (_session is not null) { _ptyColumns = columns; _ptyRows = rows; }
+            if (_session is not null) { _activeTab.PtyColumns = columns; _activeTab.PtyRows = rows; }
             if (!screenMatches)
             {
                 _view.ClearSelection();
@@ -533,12 +809,6 @@ public sealed class MainWindow : Window
             LogState("resize-applied");
         }
         catch (ExternalException ex) { Status($"Resize failed: {ex.Message}"); }
-    }
-
-    private void SetWindowTitle(string title)
-    {
-        Title = title;
-        _titleText.Text = title;
     }
 
     private void Status(string text)
@@ -593,16 +863,20 @@ public sealed class MainWindow : Window
         {
             var next = Configuration.Parse(File.ReadAllText(_configPath));
             var appearance = CheckFont(next.Appearance);
-            _view.Apply(appearance);
+            foreach (var tab in _tabs)
+            {
+                tab.View.Apply(appearance);
+                tab.Screen.ScrollbackLimit = next.Terminal.ScrollbackLines;
+                tab.View.ScrollBy(0);
+            }
             _windowFrame.BorderBrush = WindowBackgroundBrush(appearance);
             _windowFrame.CornerRadius = new CornerRadius(appearance.CornerRadius);
             _windowChrome.CornerRadius = new CornerRadius(appearance.CornerRadius);
             _windowBorder.CornerRadius = new CornerRadius(appearance.CornerRadius);
             ClipWindowContent(appearance.CornerRadius);
             ClipFrameContent(Math.Max(0, appearance.CornerRadius - ResizeBorderSize));
-            _screen.ScrollbackLimit = next.Terminal.ScrollbackLines;
-            _view.ScrollBy(0);
-            _title.Visibility = appearance.Decorations ? Visibility.Visible : Visibility.Collapsed;
+            _decorationsVisible = appearance.Decorations;
+            UpdateTabBar();
             _configuration = next;
             ResizeTerminal();
             if (_fontWarning is not null) Status(_fontWarning);
@@ -641,10 +915,15 @@ public sealed class MainWindow : Window
         { Status($"Input failed: {ex.Message}"); }
     }
 
-    private async Task SendFocusEvent(bool focused)
+    private Task SendFocusEvent(bool focused) => SendFocusEvent(_activeTab, focused);
+
+    private async Task SendFocusEvent(TerminalTab tab, bool focused)
     {
-        var sequence = _screen.EncodeFocusEvent(focused);
-        if (sequence is not null) await Send(sequence, followOutput: false);
+        var sequence = tab.Screen.EncodeFocusEvent(focused);
+        if (sequence is null || tab.Session is null || tab.Exited || tab.Closing || _closing) return;
+        try { await tab.Session.WriteAsync(sequence); }
+        catch (Exception ex) when (ex is IOException or System.Threading.Channels.ChannelClosedException or ObjectDisposedException)
+        { Status($"Input failed: {ex.Message}"); }
     }
 
     private async void MouseDownTerminal(object sender, MouseButtonEventArgs e)
@@ -755,10 +1034,30 @@ public sealed class MainWindow : Window
         return encoded >= 0;
     }
 
+   
+
     private async void KeyDownTerminal(object sender, KeyEventArgs e)
     {
         var modifiers = Keyboard.Modifiers;
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
+	if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && key == Key.T)
+        {
+            e.Handled = true;
+            AddTab();
+            return;
+        }
+        if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && key == Key.W)
+        {
+            e.Handled = true;
+            await CloseTabAsync(_activeTab);
+            return;
+        }
+	if (key == Key.Tab && modifiers is ModifierKeys.Control or (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            e.Handled = true;
+            SelectRelativeTab(modifiers.HasFlag(ModifierKeys.Shift) ? -1 : 1);
+            return;
+        }
         if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && key == Key.F)
         {
             e.Handled = true;
@@ -801,7 +1100,10 @@ public sealed class MainWindow : Window
             switch (key)
             {
                 case Key.R: e.Handled = true; Reload(); return;
-                case Key.D: e.Handled = true; _title.Visibility = _title.IsVisible ? Visibility.Collapsed : Visibility.Visible; return;
+                case Key.D:
+                    e.Handled = true;
+                    ToggleDecorations();
+                    return;
                 case Key.C:
                     e.Handled = true;
                     try { Clipboard.SetText(_view.CopyText); }
@@ -928,12 +1230,8 @@ public sealed class MainWindow : Window
         _reloadTimer.Stop();
         _smokeTimeout.Stop();
         _watcher?.Dispose();
-        try { if (_session is not null) await _session.DisposeAsync(); }
-        catch (Exception ex) when (ex is IOException or Win32Exception or ExternalException)
-        {
-            MessageBox.Show(ex.Message, "SWT shutdown failed", MessageBoxButton.OK, MessageBoxImage.Error);
-            Tag = 1;
-        }
+        foreach (var tab in _tabs) tab.Closing = true;
+        await Task.WhenAll(_tabs.Select(DisposeTabAsync).Concat(_tabClosures.ToArray()));
         _closed = true;
         Close();
         if (_smoke) Application.Current.Shutdown(Tag is int exitCode ? exitCode : 1);

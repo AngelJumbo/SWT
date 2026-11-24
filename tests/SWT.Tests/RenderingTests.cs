@@ -7,8 +7,10 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using SWT.Core;
 using SWT.Desktop;
+using SWT.Windows;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -31,7 +33,11 @@ public sealed class RenderingTests(ITestOutputHelper output)
             var title = Assert.IsType<Border>(content.Children[0]);
             var chrome = Assert.IsType<Grid>(title.Child);
             var titleContent = Assert.IsType<DockPanel>(chrome.Children[0]);
-            var titleText = Assert.IsType<TextBlock>(titleContent.Children[1]);
+            var scroller = Assert.IsType<ScrollViewer>(titleContent.Children[1]);
+            var tabs = Assert.IsType<StackPanel>(scroller.Content);
+            var header = Assert.IsType<Border>(tabs.Children[0]);
+            var headerContent = Assert.IsType<Grid>(header.Child);
+            var titleText = Assert.IsType<TextBlock>(headerContent.Children[1]);
             foreach (var text in new[] { "Editor", new string('x', 1024), "" })
             {
                 screen.Feed(Encoding.UTF8.GetBytes($"\x1b]2;{text}\a"));
@@ -40,6 +46,240 @@ public sealed class RenderingTests(ITestOutputHelper output)
                 Assert.Same(screen, field.GetValue(window));
             }
         });
+    }
+
+    [Fact]
+    public void TabStripTracksDecorationsAndActiveScreen()
+    {
+        OnSta(() =>
+        {
+            var configuration = Configuration.Parse("") with
+            {
+                Appearance = Configuration.Parse("").Appearance with { Decorations = false }
+            };
+            var window = new MainWindow(configuration, "", smoke: true);
+            var root = Assert.IsType<Grid>(window.Content);
+            var content = Assert.IsType<Grid>(Assert.IsType<Border>(root.Children[0]).Child);
+            var title = Assert.IsType<Border>(content.Children[0]);
+            var chrome = Assert.IsType<Grid>(title.Child);
+            var captionButtons = Assert.IsType<StackPanel>(chrome.Children[1]);
+            var tabsArea = Assert.IsType<DockPanel>(chrome.Children[0]);
+            var tabs = Assert.IsType<StackPanel>(Assert.IsType<ScrollViewer>(tabsArea.Children[1]).Content);
+            var first = Assert.IsType<TerminalView>(content.Children[1]);
+            first.Screen.Feed(Encoding.UTF8.GetBytes("\x1b]2;first\a"));
+            Assert.Equal(Visibility.Collapsed, title.Visibility);
+
+            window.AddTab();
+            var second = Assert.IsType<TerminalView>(content.Children[1]);
+            Assert.NotSame(first.Screen, second.Screen);
+            Assert.Equal(Visibility.Visible, title.Visibility);
+            Assert.Equal(Visibility.Collapsed, captionButtons.Visibility);
+            Assert.Equal(2, tabs.Children.Count);
+            second.Screen.Feed(Encoding.UTF8.GetBytes("\x1b]2;second\a"));
+            first.Screen.Feed(Encoding.UTF8.GetBytes("\x1b]2;background\a"));
+            Assert.Equal("second", window.Title);
+            window.OpenSearch();
+            var search = Assert.IsType<Border>(root.Children[2]);
+            Assert.Equal(Visibility.Visible, search.Visibility);
+            window.SelectRelativeTab(-1);
+            Assert.Equal(Visibility.Collapsed, search.Visibility);
+            Assert.Same(first, content.Children[1]);
+            Assert.Equal("background", window.Title);
+
+            window.ToggleDecorations();
+            Assert.Equal(Visibility.Visible, captionButtons.Visibility);
+            window.ToggleDecorations();
+            Assert.Equal(Visibility.Collapsed, captionButtons.Visibility);
+            window.AddTab();
+            var third = Assert.IsType<TerminalView>(content.Children[1]);
+            var secondHeader = Assert.IsType<Border>(tabs.Children[1]);
+            var closeInactive = Assert.IsType<Button>(Assert.IsType<Grid>(secondHeader.Child).Children[2]);
+            closeInactive.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Same(third, content.Children[1]);
+            Assert.Equal(2, tabs.Children.Count);
+            window.SelectRelativeTab(-1);
+            var firstHeader = Assert.IsType<Border>(tabs.Children[0]);
+            var close = Assert.IsType<Button>(Assert.IsType<Grid>(firstHeader.Child).Children[2]);
+            close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Same(third, content.Children[1]);
+            Assert.Single(tabs.Children);
+            Assert.Equal(Visibility.Collapsed, title.Visibility);
+            Assert.Equal("SWT", window.Title);
+        });
+    }
+
+    [Fact]
+    public void DecoratedTabsShrinkAndLeaveUnusedTitleSpaceForDragging()
+    {
+        OnSta(() =>
+        {
+            var window = new MainWindow(Configuration.Parse(""), "", smoke: true);
+            var root = Assert.IsType<Grid>(window.Content);
+            var content = Assert.IsType<Grid>(Assert.IsType<Border>(root.Children[0]).Child);
+            var title = Assert.IsType<Border>(content.Children[0]);
+            var chrome = Assert.IsType<Grid>(title.Child);
+            var area = Assert.IsType<DockPanel>(chrome.Children[0]);
+            var scroller = Assert.IsType<ScrollViewer>(area.Children[1]);
+            var tabs = Assert.IsType<StackPanel>(scroller.Content);
+
+            void Layout(double width)
+            {
+                root.Measure(new Size(width, 300));
+                root.Arrange(new Rect(0, 0, width, 300));
+                root.UpdateLayout();
+            }
+
+            Layout(800);
+            var first = Assert.IsType<Border>(tabs.Children[0]);
+            var icon = Assert.IsType<TextBlock>(Assert.IsType<Grid>(first.Child).Children[0]);
+            Assert.Equal(36, title.Height);
+            Assert.Equal(Visibility.Visible, icon.Visibility);
+            Assert.Equal(160, first.Width);
+            Assert.Same(area, VisualTreeHelper.HitTest(area, new Point(scroller.ActualWidth + 10, 15))?.VisualHit);
+
+            for (var i = 0; i < 5; i++) window.AddTab();
+            Layout(800);
+            Assert.InRange(first.Width, 72.1, 159.9);
+            Assert.InRange(scroller.ScrollableWidth, 0, 0.1);
+            Assert.Same(area, VisualTreeHelper.HitTest(area, new Point(scroller.ActualWidth + 10, 15))?.VisualHit);
+
+            var oldWidth = first.Width;
+            var close = Assert.IsType<Button>(Assert.IsType<Grid>(first.Child).Children[2]);
+            close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Layout(800);
+            first = Assert.IsType<Border>(tabs.Children[0]);
+            icon = Assert.IsType<TextBlock>(Assert.IsType<Grid>(first.Child).Children[0]);
+            Assert.True(first.Width > oldWidth);
+
+            for (var i = 0; i < 9; i++) window.AddTab();
+            Layout(800);
+            Assert.Equal(72, first.Width);
+            Assert.True(scroller.ScrollableWidth > 0);
+            scroller.ScrollToHorizontalOffset(scroller.ScrollableWidth);
+            root.UpdateLayout();
+            Assert.True(scroller.HorizontalOffset > 0);
+            Assert.Same(area, VisualTreeHelper.HitTest(area, new Point(scroller.ActualWidth + 10, 15))?.VisualHit);
+
+            Layout(1600);
+            Assert.True(first.Width > 72);
+            window.ToggleDecorations();
+            Layout(800);
+            Assert.Equal(26, title.Height);
+            Assert.Equal(Visibility.Collapsed, icon.Visibility);
+            var tabContent = Assert.IsType<Grid>(first.Child);
+            var label = Assert.IsType<TextBlock>(tabContent.Children[1]);
+            var tabClose = Assert.IsType<Button>(tabContent.Children[2]);
+            Assert.True(label.ActualHeight <= first.ActualHeight);
+            Assert.True(tabClose.ActualHeight <= first.ActualHeight);
+        });
+    }
+
+    [Fact]
+    public void SearchMarginTracksDecorationHeightChanges()
+    {
+        OnSta(() =>
+        {
+            var window = new MainWindow(Configuration.Parse(""), "", smoke: true);
+            window.AddTab();
+            window.OpenSearch();
+            var root = Assert.IsType<Grid>(window.Content);
+            var toolbar = Assert.IsType<Border>(root.Children[2]);
+            root.Measure(new Size(800, 300));
+            root.Arrange(new Rect(0, 0, 800, 300));
+            root.UpdateLayout();
+            Assert.Equal(48, toolbar.Margin.Top);
+            window.ToggleDecorations();
+            root.UpdateLayout();
+            Assert.Equal(38, toolbar.Margin.Top);
+            window.ToggleDecorations();
+            root.UpdateLayout();
+            Assert.Equal(48, toolbar.Margin.Top);
+        });
+    }
+
+    [Fact]
+    public void TabsKeepShellsAndBackgroundOutputIndependent()
+    {
+        OnSta(() =>
+        {
+            var configuration = Configuration.Parse("");
+            configuration = configuration with
+            {
+                Shell = configuration.Shell with
+                {
+                    Executable = Path.Combine(Environment.SystemDirectory, "cmd.exe"),
+                    Arguments = ["/d", "/q"],
+                    WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                }
+            };
+            var configPath = Path.Combine(Path.GetTempPath(), $"swt-test-{Guid.NewGuid():N}.toml");
+            var window = new MainWindow(configuration, configPath, smoke: false) { ShowActivated = false, ShowInTaskbar = false };
+            var sessionProperty = typeof(MainWindow).GetProperty("_session",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var send = typeof(MainWindow).GetMethod("Send",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var root = Assert.IsType<Grid>(window.Content);
+            var content = Assert.IsType<Grid>(Assert.IsType<Border>(root.Children[0]).Child);
+            try
+            {
+                window.Show();
+                PumpUntil(() => sessionProperty.GetValue(window) is ConPtySession);
+                var firstSession = Assert.IsType<ConPtySession>(sessionProperty.GetValue(window));
+                using var firstProcess = Process.GetProcessById(firstSession.ProcessId);
+                var first = Assert.IsType<TerminalView>(content.Children[1]);
+                window.AddTab();
+                PumpUntil(() => sessionProperty.GetValue(window) is ConPtySession session && session != firstSession);
+                var secondSession = Assert.IsType<ConPtySession>(sessionProperty.GetValue(window));
+                using var secondProcess = Process.GetProcessById(secondSession.ProcessId);
+                var second = Assert.IsType<TerminalView>(content.Children[1]);
+                _ = (Task)send.Invoke(window, ["echo SECOND_MARKER\r", true])!;
+                _ = firstSession.WriteAsync("echo FIRST_MARKER\r");
+                static bool Contains(TerminalScreen screen, string marker) =>
+                    Enumerable.Range(0, screen.ScrollbackCount + screen.Rows)
+                        .Any(row => screen.GetViewportLine(row, screen.ScrollbackCount).Text(screen.Columns)
+                            .Contains(marker, StringComparison.Ordinal));
+                PumpUntil(() => Contains(first.Screen, "FIRST_MARKER") && Contains(second.Screen, "SECOND_MARKER"));
+                Assert.False(Contains(first.Screen, "SECOND_MARKER"));
+                Assert.False(Contains(second.Screen, "FIRST_MARKER"));
+                window.SelectRelativeTab(-1);
+                Assert.Same(first, content.Children[1]);
+                Assert.Same(firstSession, sessionProperty.GetValue(window));
+                var title = Assert.IsType<Border>(content.Children[0]);
+                var chrome = Assert.IsType<Grid>(title.Child);
+                var tabsArea = Assert.IsType<DockPanel>(chrome.Children[0]);
+                var tabs = Assert.IsType<StackPanel>(Assert.IsType<ScrollViewer>(tabsArea.Children[1]).Content);
+                var header = Assert.IsType<Border>(tabs.Children[0]);
+                var close = Assert.IsType<Button>(Assert.IsType<Grid>(header.Child).Children[2]);
+                close.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => firstProcess.HasExited);
+                Assert.False(secondProcess.HasExited);
+                Assert.Same(secondSession, sessionProperty.GetValue(window));
+                window.Close();
+                PumpUntil(() => secondProcess.HasExited && !window.IsVisible);
+            }
+            finally
+            {
+                if (window.IsVisible)
+                {
+                    window.Close();
+                    PumpUntil(() => !window.IsVisible);
+                }
+            }
+        });
+    }
+
+    private static void PumpUntil(Func<bool> condition)
+    {
+        var deadline = Stopwatch.StartNew();
+        while (!condition())
+        {
+            Assert.True(deadline.Elapsed < TimeSpan.FromSeconds(10), "Timed out waiting for tab operation.");
+            var frame = new DispatcherFrame();
+            var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+            timer.Tick += (_, _) => { timer.Stop(); frame.Continue = false; };
+            timer.Start();
+            Dispatcher.PushFrame(frame);
+        }
     }
 
     [Fact]

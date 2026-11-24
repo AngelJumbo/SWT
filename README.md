@@ -69,6 +69,7 @@ individual Windows arguments, not a command line to split.
 
 - Opacity: `0.0` to `1.0`, background only; text stays opaque.
 - Decorations: app-drawn title bar and controls, not native OS decorations.
+  Caption buttons use rounded hover and pressed highlights: slate for Minimize and Maximize/Restore, red for Close.
 - Corner radius: `window.corner_radius`, 0 to 32 WPF device-independent pixels (default 0); live reload applies it.
 - Columns: 20 to 500; rows: 5 to 200; initial dimensions only.
 - Scrollback: `terminal.scrollback_lines`, 0 to 100,000 (default 10,000; 0 disables).

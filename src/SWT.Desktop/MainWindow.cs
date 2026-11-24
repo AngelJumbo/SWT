@@ -115,10 +115,10 @@ public sealed class MainWindow : Window
         };
         chrome.Children.Add(titleContent);
         var buttons = new StackPanel { Orientation = Orientation.Horizontal };
-        buttons.Children.Add(Button("M 1,9 H 9", () => WindowState = WindowState.Minimized));
-        _maximizeButton = Button("M 1,1 H 9 V 9 H 1 Z", ToggleMaximize);
+        buttons.Children.Add(CaptionButton("M 1,9 H 9", () => WindowState = WindowState.Minimized));
+        _maximizeButton = CaptionButton("M 1,1 H 9 V 9 H 1 Z", ToggleMaximize);
         buttons.Children.Add(_maximizeButton);
-        buttons.Children.Add(Button("M 2,2 L 8,8 M 8,2 L 2,8", Close, isClose: true));
+        buttons.Children.Add(CaptionButton("M 2,2 L 8,8 M 8,2 L 2,8", Close, isClose: true));
         Grid.SetColumn(buttons, 1);
         chrome.Children.Add(buttons);
         _title = new Border
@@ -235,20 +235,36 @@ public sealed class MainWindow : Window
     private void ToggleMaximize() =>
         WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
-    private static Button Button(string geometry, Action action, bool isClose = false)
+    private static Button CaptionButton(string geometry, Action action, bool isClose = false)
     {
+        var hitArea = new FrameworkElementFactory(typeof(Border));
+        hitArea.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+        var highlight = new FrameworkElementFactory(typeof(Border), "Highlight");
+        highlight.SetValue(MarginProperty, new Thickness(4, 3, 4, 3));
+        highlight.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
+        var content = new FrameworkElementFactory(typeof(ContentPresenter));
+        content.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+        content.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+        highlight.AppendChild(content);
+        hitArea.AppendChild(highlight);
+
+        var template = new ControlTemplate(typeof(Button)) { VisualTree = hitArea };
+        var hover = new Trigger { Property = IsMouseOverProperty, Value = true };
+        hover.Setters.Add(new Setter(Border.BackgroundProperty,
+            new SolidColorBrush(isClose ? Color.FromRgb(175, 43, 35) : Color.FromRgb(54, 61, 73)),
+            highlight.Name));
+        template.Triggers.Add(hover);
+        var pressed = new Trigger { Property = Button.IsPressedProperty, Value = true };
+        pressed.Setters.Add(new Setter(Border.BackgroundProperty,
+            new SolidColorBrush(isClose ? Color.FromRgb(139, 34, 28) : Color.FromRgb(70, 78, 91)),
+            highlight.Name));
+        template.Triggers.Add(pressed);
+
         var button = new Button
         {
             Content = WindowIcon(geometry), Width = 46, Height = 35,
-            Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0),
-            Focusable = false, Cursor = Cursors.Arrow
+            Template = template, Focusable = false, Cursor = Cursors.Arrow
         };
-        var hover = new SolidColorBrush(isClose ? Color.FromRgb(196, 43, 28) : Color.FromRgb(54, 61, 73));
-        var pressed = new SolidColorBrush(isClose ? Color.FromRgb(161, 31, 22) : Color.FromRgb(70, 78, 91));
-        button.MouseEnter += (_, _) => button.Background = hover;
-        button.MouseLeave += (_, _) => button.Background = Brushes.Transparent;
-        button.PreviewMouseDown += (_, _) => button.Background = pressed;
-        button.PreviewMouseUp += (_, _) => button.Background = button.IsMouseOver ? hover : Brushes.Transparent;
         button.Click += (_, e) => { e.Handled = true; action(); };
         return button;
     }

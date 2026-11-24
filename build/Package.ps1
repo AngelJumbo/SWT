@@ -27,7 +27,7 @@ try {
     dotnet publish .\src\SWT.Desktop\SWT.Desktop.csproj --configuration Release `
         --runtime win-x64 --self-contained true --output $publish `
         "-p:Version=$Version" "-p:FileVersion=$numericVersion.0" `
-        -p:PublishSingleFile=false -p:PublishTrimmed=false -p:ContinuousIntegrationBuild=true
+        -p:PublishSingleFile=false -p:PublishTrimmed=false -p:PublishReadyToRun=true -p:ContinuousIntegrationBuild=true
     if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed." }
     if (-not (Test-Path "$publish\SWT.Desktop.exe")) { throw "Published executable is missing." }
 

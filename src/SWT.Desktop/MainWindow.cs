@@ -30,10 +30,10 @@ public sealed class MainWindow : Window
     private readonly Grid _frameContent;
     private readonly WindowChrome _windowChrome;
     private readonly Button _maximizeButton;
-    private readonly Border _searchBar;
-    private readonly TextBox _searchBox;
-    private readonly TextBlock _searchStatus;
-    private readonly CheckBox _regexSearch;
+    private Border? _searchBar;
+    private TextBox _searchBox = null!;
+    private TextBlock _searchStatus = null!;
+    private CheckBox _regexSearch = null!;
     private readonly DispatcherTimer _reloadTimer;
     private readonly FileSystemWatcher? _watcher;
     private readonly List<string> _replies = [];
@@ -77,8 +77,11 @@ public sealed class MainWindow : Window
         _screen = new TerminalScreen(configuration.Appearance.Columns, configuration.Appearance.Rows,
             configuration.Terminal.ScrollbackLines);
         _screen.Reply += _replies.Add;
+        diagnostics?.WriteStartup("font-check-starting");
         var appearance = CheckFont(configuration.Appearance);
+        diagnostics?.WriteStartup("font-checked");
         _view = new TerminalView(_screen, appearance);
+        diagnostics?.WriteStartup("view-created");
         Width = configuration.Appearance.Columns * _view.CellWidth + 28;
         Height = configuration.Appearance.Rows * _view.CellHeight + 52 + ResizeBorderSize * 2;
         _windowContent = new Grid();
@@ -152,77 +155,6 @@ public sealed class MainWindow : Window
             IsHitTestVisible = false
         };
         _windowContent.Children.Add(_windowBorder);
-        _searchBox = new TextBox
-        {
-            MaxLength = 4096, ToolTip = "Search text (case-insensitive)",
-            Background = new SolidColorBrush(Color.FromRgb(25, 29, 36)),
-            Foreground = Brushes.WhiteSmoke, CaretBrush = Brushes.WhiteSmoke,
-            BorderThickness = new Thickness(0, 0, 0, 2),
-            Padding = new Thickness(8, 5, 8, 5), FontSize = 13,
-            VerticalContentAlignment = VerticalAlignment.Center, MinWidth = 0
-        };
-        System.Windows.Automation.AutomationProperties.SetName(_searchBox, "Search terminal history");
-        var inputStyle = new Style(typeof(TextBox));
-        inputStyle.Setters.Add(new Setter(Control.BorderBrushProperty,
-            new SolidColorBrush(Color.FromRgb(70, 80, 95))));
-        var inputFocus = new Trigger { Property = IsKeyboardFocusedProperty, Value = true };
-        inputFocus.Setters.Add(new Setter(Control.BorderBrushProperty,
-            new SolidColorBrush(Color.FromRgb(129, 161, 193))));
-        inputStyle.Triggers.Add(inputFocus);
-        _searchBox.Style = inputStyle;
-        _searchStatus = new TextBlock
-        {
-            Foreground = new SolidColorBrush(Color.FromRgb(235, 174, 145)),
-            FontSize = 12, Margin = new Thickness(8, 5, 0, 0), Visibility = Visibility.Collapsed,
-            TextWrapping = TextWrapping.Wrap
-        };
-        var searchControls = new Grid();
-        searchControls.ColumnDefinitions.Add(new ColumnDefinition());
-        searchControls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        searchControls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        searchControls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        searchControls.Children.Add(_searchBox);
-        var searchActions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(6, 0, 0, 0) };
-        searchActions.Children.Add(SearchButton("M 2,7 L 6,3 L 10,7 M 6,3 V 11",
-            "Previous match (Shift+Enter)", () => FindText(previous: true)));
-        searchActions.Children.Add(SearchButton("M 2,7 L 6,11 L 10,7 M 6,3 V 11",
-            "Next match (Enter)", () => FindText(previous: false)));
-        _regexSearch = new CheckBox
-        {
-            Content = ".*", Foreground = Brushes.WhiteSmoke, VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(4, 0, 4, 0), ToolTip = "Use regular expressions"
-        };
-        System.Windows.Automation.AutomationProperties.SetName(_regexSearch, "Use regular expressions");
-        _regexSearch.Checked += (_, _) => ResetSearch();
-        _regexSearch.Unchecked += (_, _) => ResetSearch();
-        searchActions.Children.Add(_regexSearch);
-        searchActions.Children.Add(SearchButton("M 3,3 L 11,11 M 11,3 L 3,11",
-            "Close search (Escape)", CloseSearch));
-        Grid.SetColumn(searchActions, 1);
-        searchControls.Children.Add(searchActions);
-        Grid.SetRow(_searchStatus, 1);
-        Grid.SetColumnSpan(_searchStatus, 2);
-        searchControls.Children.Add(_searchStatus);
-        _searchBox.TextChanged += (_, _) => ResetSearch();
-        _searchBar = new Border
-        {
-            Child = searchControls, Background = new SolidColorBrush(Color.FromRgb(37, 43, 53)),
-            BorderBrush = new SolidColorBrush(Color.FromRgb(62, 72, 87)), BorderThickness = new Thickness(1),
-            CornerRadius = new CornerRadius(8), Padding = new Thickness(8),
-            MaxWidth = 420, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Top,
-            Visibility = Visibility.Collapsed
-        };
-        var searchBarStyle = new Style(typeof(Border));
-        searchBarStyle.Setters.Add(new Setter(MarginProperty, new Thickness(12)));
-        var titleVisible = new DataTrigger
-        {
-            Binding = new System.Windows.Data.Binding(nameof(Visibility)) { Source = _title },
-            Value = Visibility.Visible
-        };
-        titleVisible.Setters.Add(new Setter(MarginProperty, new Thickness(12, _title.Height + 12, 12, 12)));
-        searchBarStyle.Triggers.Add(titleVisible);
-        _searchBar.Style = searchBarStyle;
-        _windowContent.Children.Add(_searchBar);
         _windowContent.SizeChanged += (_, _) => ClipWindowContent(_configuration.Appearance.CornerRadius);
         _frameContent.SizeChanged += (_, _) =>
             ClipFrameContent(Math.Max(0, _configuration.Appearance.CornerRadius - ResizeBorderSize));
@@ -236,6 +168,7 @@ public sealed class MainWindow : Window
         if (diagnostics is not null)
         {
             SourceInitialized += (_, _) => LogState("source-initialized");
+            ContentRendered += (_, _) => LogState("content-rendered");
             LayoutUpdated += (_, _) =>
             {
                 var layout = (ActualWidth, ActualHeight, _view.ActualWidth, _view.ActualHeight);
@@ -326,6 +259,90 @@ public sealed class MainWindow : Window
         Stroke = new SolidColorBrush(Color.FromRgb(216, 222, 233)), StrokeThickness = 1.2,
         StrokeStartLineCap = PenLineCap.Square, StrokeEndLineCap = PenLineCap.Square
     };
+
+    private Border CreateSearchBar()
+    {
+        _searchBox = new TextBox
+        {
+            MaxLength = 4096, ToolTip = "Search text (case-insensitive)",
+            Background = new SolidColorBrush(Color.FromRgb(25, 29, 36)),
+            Foreground = Brushes.WhiteSmoke, CaretBrush = Brushes.WhiteSmoke,
+            BorderThickness = new Thickness(0, 0, 0, 2),
+            Padding = new Thickness(8, 5, 8, 5), FontSize = 13,
+            VerticalContentAlignment = VerticalAlignment.Center, MinWidth = 0
+        };
+        System.Windows.Automation.AutomationProperties.SetName(_searchBox, "Search terminal history");
+        var inputStyle = new Style(typeof(TextBox));
+        inputStyle.Setters.Add(new Setter(Control.BorderBrushProperty,
+            new SolidColorBrush(Color.FromRgb(70, 80, 95))));
+        var inputFocus = new Trigger { Property = IsKeyboardFocusedProperty, Value = true };
+        inputFocus.Setters.Add(new Setter(Control.BorderBrushProperty,
+            new SolidColorBrush(Color.FromRgb(129, 161, 193))));
+        inputStyle.Triggers.Add(inputFocus);
+        _searchBox.Style = inputStyle;
+        _searchStatus = new TextBlock
+        {
+            Foreground = new SolidColorBrush(Color.FromRgb(235, 174, 145)),
+            FontSize = 12, Margin = new Thickness(8, 5, 0, 0), Visibility = Visibility.Collapsed,
+            TextWrapping = TextWrapping.Wrap
+        };
+        var searchControls = new Grid();
+        searchControls.ColumnDefinitions.Add(new ColumnDefinition());
+        searchControls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        searchControls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        searchControls.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        searchControls.Children.Add(_searchBox);
+        var searchActions = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(6, 0, 0, 0) };
+        searchActions.Children.Add(SearchButton("M 2,7 L 6,3 L 10,7 M 6,3 V 11",
+            "Previous match (Shift+Enter)", () => FindText(previous: true)));
+        searchActions.Children.Add(SearchButton("M 2,7 L 6,11 L 10,7 M 6,3 V 11",
+            "Next match (Enter)", () => FindText(previous: false)));
+        _regexSearch = new CheckBox
+        {
+            Content = ".*", Foreground = Brushes.WhiteSmoke, VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(4, 0, 4, 0), ToolTip = "Use regular expressions"
+        };
+        System.Windows.Automation.AutomationProperties.SetName(_regexSearch, "Use regular expressions");
+        _regexSearch.Checked += (_, _) => ResetSearch();
+        _regexSearch.Unchecked += (_, _) => ResetSearch();
+        searchActions.Children.Add(_regexSearch);
+        searchActions.Children.Add(SearchButton("M 3,3 L 11,11 M 11,3 L 3,11",
+            "Close search (Escape)", CloseSearch));
+        Grid.SetColumn(searchActions, 1);
+        searchControls.Children.Add(searchActions);
+        Grid.SetRow(_searchStatus, 1);
+        Grid.SetColumnSpan(_searchStatus, 2);
+        searchControls.Children.Add(_searchStatus);
+        _searchBox.TextChanged += (_, _) => ResetSearch();
+        var searchBar = new Border
+        {
+            Child = searchControls, Background = new SolidColorBrush(Color.FromRgb(37, 43, 53)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(62, 72, 87)), BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(8), Padding = new Thickness(8),
+            MaxWidth = 420, HorizontalAlignment = HorizontalAlignment.Stretch, VerticalAlignment = VerticalAlignment.Top,
+            Visibility = Visibility.Collapsed
+        };
+        var searchBarStyle = new Style(typeof(Border));
+        searchBarStyle.Setters.Add(new Setter(MarginProperty, new Thickness(12)));
+        var titleVisible = new DataTrigger
+        {
+            Binding = new System.Windows.Data.Binding(nameof(Visibility)) { Source = _title },
+            Value = Visibility.Visible
+        };
+        titleVisible.Setters.Add(new Setter(MarginProperty, new Thickness(12, _title.Height + 12, 12, 12)));
+        searchBarStyle.Triggers.Add(titleVisible);
+        searchBar.Style = searchBarStyle;
+        _windowContent.Children.Add(searchBar);
+        return searchBar;
+    }
+
+    internal void OpenSearch()
+    {
+        _searchBar ??= CreateSearchBar();
+        _searchBar.Visibility = Visibility.Visible;
+        _searchBox.Focus();
+        _searchBox.SelectAll();
+    }
 
     private static Button SearchButton(string geometry, string label, Action action)
     {
@@ -729,12 +746,10 @@ public sealed class MainWindow : Window
         if (modifiers == (ModifierKeys.Control | ModifierKeys.Shift) && key == Key.F)
         {
             e.Handled = true;
-            _searchBar.Visibility = Visibility.Visible;
-            _searchBox.Focus();
-            _searchBox.SelectAll();
+            OpenSearch();
             return;
         }
-        if (_searchBar.IsKeyboardFocusWithin)
+        if (_searchBar?.IsKeyboardFocusWithin == true)
         {
             if (key == Key.Escape)
             {
@@ -883,7 +898,7 @@ public sealed class MainWindow : Window
 
     private void CloseSearch()
     {
-        _searchBar.Visibility = Visibility.Collapsed;
+        if (_searchBar is not null) _searchBar.Visibility = Visibility.Collapsed;
         _view.ClearSearch();
         _view.Focus();
     }

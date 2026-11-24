@@ -281,6 +281,45 @@ Logs record dimensions, cursor positions and numeric VT control sequences, not
 commands or printable shell output. Logging stops with a warning at 10 MiB.
 Controls split across output batches may not appear in the diagnostic summary.
 
+### Startup performance
+
+Release packages use ReadyToRun precompilation to reduce startup JIT work. The
+search toolbar is created only when first opened with Ctrl+Shift+F, then reused.
+Shell arguments and PowerShell profile loading are unchanged.
+
+For normal use, launch the packaged executable directly. The development launcher
+uses `dotnet run`, which also performs SDK/build work on every launch.
+
+To reproduce startup measurements with the current source:
+
+```powershell
+dotnet publish .\src\SWT.Desktop\SWT.Desktop.csproj -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true -o .\artifacts\startup
+$samples = .\build\Measure-Startup.ps1 -Executable .\artifacts\startup\SWT.Desktop.exe
+$samples | Format-Table
+$samples | Measure-Object LoadedMs,FirstRenderMs,FirstOutputMs -Average -Minimum -Maximum
+```
+
+The probe discards one warmup, then measures ten fresh processes with a warm
+filesystem cache. It uses the smoke workload and does not change user configuration.
+It reports elapsed time from process creation to configuration loaded, construction,
+WPF `Loaded`, WPF `ContentRendered`, and first shell output, plus font/view
+initialization and native ConPTY creation durations. `TotalMs` includes shutdown.
+Successful samples' diagnostic logs are deleted.
+
+In one local comparison of self-contained x64 builds, ten samples per build in
+alternating batches averaged:
+
+| Milestone | Before | Deferred search + ReadyToRun |
+|---|---:|---:|
+| WPF `Loaded` | 633 ms | 581 ms |
+| First shell output | 834 ms | 777 ms |
+
+These are diagnostic-enabled, warm-cache measurements, not cold-boot timings or
+time to an interactive prompt. Diagnostic serialization/file I/O adds overhead;
+machine load and shell configuration affect results. A separate ten-sample check
+without diagnostics averaged 1,180 ms versus 1,152 ms for the entire smoke
+lifecycle, including shell exit and cleanup; this is not a startup-only metric.
+
 ```powershell
 dotnet test .\SWT.slnx
 .\run.ps1 -SmokeTest

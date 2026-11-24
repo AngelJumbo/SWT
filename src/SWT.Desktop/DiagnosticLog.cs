@@ -28,5 +28,8 @@ internal sealed class DiagnosticLog : IDisposable
         _writer.WriteLine(JsonSerializer.Serialize(entry));
     }
 
+    internal void WriteStartup(string reason) =>
+        Write(new { timestamp = DateTimeOffset.UtcNow, reason, pid = Environment.ProcessId });
+
     public void Dispose() => _writer.Dispose();
 }

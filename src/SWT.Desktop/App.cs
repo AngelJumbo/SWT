@@ -34,6 +34,7 @@ public sealed class App : Application
                     configuration = Configuration.Parse(Configuration.DefaultToml);
                 }
             }
+            diagnostics?.WriteStartup("configuration-loaded");
             return app.Run(new MainWindow(configuration, path, smoke, diagnostics));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ConfigurationException)

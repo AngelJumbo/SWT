@@ -43,14 +43,19 @@ public sealed class RenderingTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void SearchToolbarUsesCompactIconsAndFitsMinimumWindowWidth()
+    public void SearchToolbarIsCreatedOnDemandAndFitsMinimumWindowWidth()
     {
         OnSta(() =>
         {
             var window = new MainWindow(Configuration.Parse(""), "", smoke: true);
             var root = Assert.IsType<Grid>(window.Content);
+            Assert.Equal(2, root.Children.Count);
+            window.OpenSearch();
             var toolbar = Assert.IsType<Border>(root.Children[2]);
-            toolbar.Visibility = Visibility.Visible;
+            Assert.Equal(Visibility.Visible, toolbar.Visibility);
+            window.OpenSearch();
+            Assert.Equal(3, root.Children.Count);
+            Assert.Same(toolbar, root.Children[2]);
             var controls = Assert.IsType<Grid>(toolbar.Child);
             var input = Assert.IsType<TextBox>(controls.Children[0]);
             var actions = Assert.IsType<StackPanel>(controls.Children[1]);
@@ -73,6 +78,17 @@ public sealed class RenderingTests(ITestOutputHelper output)
                 var bitmap = new RenderTargetBitmap(width, 300, 96, 96, PixelFormats.Pbgra32);
                 bitmap.Render(root);
             }
+            input.Text = "match";
+            var regex = Assert.Single(actions.Children.OfType<CheckBox>());
+            regex.IsChecked = true;
+            actions.Children.OfType<Button>().Last().RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(Visibility.Collapsed, toolbar.Visibility);
+            window.OpenSearch();
+            Assert.Equal(3, root.Children.Count);
+            Assert.Same(toolbar, root.Children[2]);
+            Assert.Equal("match", input.Text);
+            Assert.True(regex.IsChecked);
+            Assert.Equal(input.Text.Length, input.SelectionLength);
         });
     }
 
@@ -86,6 +102,7 @@ public sealed class RenderingTests(ITestOutputHelper output)
             var frame = Assert.IsType<Border>(root.Children[0]);
             var content = Assert.IsType<Grid>(frame.Child);
             var title = Assert.IsType<Border>(content.Children[0]);
+            window.OpenSearch();
             var toolbar = Assert.IsType<Border>(root.Children[2]);
             toolbar.Visibility = Visibility.Visible;
             foreach (var visibility in new[] { Visibility.Collapsed, Visibility.Visible, Visibility.Collapsed })
